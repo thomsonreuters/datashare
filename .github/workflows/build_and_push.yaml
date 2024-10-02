@@ -108,7 +108,7 @@ jobs:
         run: mvn validate
 
       - name: Install commons-test
-        run: mvn -pl commons-test -am install
+        run: mvn -pl commons-test -am install -DskipTests
 
       - name: Update database
         run: mvn -pl datashare-db liquibase:update
