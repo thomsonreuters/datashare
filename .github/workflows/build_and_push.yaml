@@ -98,6 +98,12 @@ jobs:
         with:
           maven-version: 3.6.3
 
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
       - name: Validate project
         run: mvn validate
 
