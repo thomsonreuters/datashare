@@ -43,7 +43,7 @@ jobs:
       postgres:
         image: postgres:latest
         env:
-          POSTGRES_DB: datashare
+          POSTGRES_DB: datashare_liquibase
           POSTGRES_USER: dstest
           POSTGRES_PASSWORD: test
         ports:
