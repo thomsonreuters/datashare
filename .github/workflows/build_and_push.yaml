@@ -70,7 +70,7 @@ jobs:
       - name: Extract version from pom.xml
         id: get_version
         run: |
-          VERSION=$(cat pom.xml | grep '<version>[0-9.]\+' | sed 's/<version>\([0-9.]\+\)<\/version>/\1/g' | tr -d '[:space:]')
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           echo "::set-output name=VERSION::$VERSION"
 
       - name: Print version
