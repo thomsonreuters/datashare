@@ -87,7 +87,7 @@ jobs:
       - name: Run init script on PostgreSQL
         run: PGPASSWORD=test psql -h localhost -U dstest -d datashare_liquibase -a -f ./datashare-db/scr/init.sql
 
-      - name: Set up JDK 11
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           java-version: '17'
