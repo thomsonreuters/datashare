@@ -281,8 +281,8 @@ public abstract class CommonMode extends AbstractModule {
                         return defaultObjectMapper;
                     }
                 });
-        addModeConfiguration(routes);
         addExtensionsConfiguration(routes);
+        addModeConfiguration(routes);
         addPluginsConfiguration(routes);
         return routes;
     }
