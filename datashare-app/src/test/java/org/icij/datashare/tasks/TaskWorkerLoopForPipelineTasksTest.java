@@ -1,8 +1,10 @@
 package org.icij.datashare.tasks;
 
+import java.util.List;
 import java.util.function.Function;
 import org.icij.datashare.PropertiesProvider;
 import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.asynctasks.TaskRepositoryMemory;
 import org.icij.datashare.extension.PipelineRegistry;
 import org.icij.datashare.extract.DocumentCollectionFactory;
 import org.icij.datashare.text.indexing.Indexer;
@@ -14,8 +16,6 @@ import org.mockito.Mock;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.fest.assertions.Assertions.assertThat;
@@ -29,8 +29,7 @@ public class TaskWorkerLoopForPipelineTasksTest {
     DatashareTaskFactory taskFactory;
     @Mock Function<Double, Void> updateCallback;
     @Mock ElasticsearchSpewer spewer;
-    private final BlockingQueue<Task<?>> taskQueue = new LinkedBlockingQueue<>();
-    private final TaskManagerMemory taskSupplier = new TaskManagerMemory(taskQueue, taskFactory);
+    private final TaskManagerMemory taskSupplier = new TaskManagerMemory(taskFactory, new TaskRepositoryMemory(), new PropertiesProvider());
 
     @Test
     public void test_scan_task() throws Exception {
@@ -88,10 +87,11 @@ public class TaskWorkerLoopForPipelineTasksTest {
 
     private void testTaskWithTaskRunner(Task<Long> task) throws Exception {
         taskSupplier.startTask(task.name, User.local(), task.args);
-        taskSupplier.shutdownAndAwaitTermination(1, TimeUnit.SECONDS);
+        taskSupplier.awaitTermination(1, TimeUnit.SECONDS);
 
-        assertThat(taskSupplier.getTasks()).hasSize(1);
-        assertThat(taskSupplier.getTasks().get(0).name).isEqualTo(task.name);
+        List<Task<?>> tasks = taskSupplier.getTasks().toList();
+        assertThat(tasks).hasSize(1);
+        assertThat(tasks.get(0).name).isEqualTo(task.name);
     }
 
     @Before

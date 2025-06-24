@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.mockito.Mockito.when;
@@ -22,18 +23,25 @@ public class MockIndexer {
     }
 
     public void indexFile(String index, String _id, Path path, String contentType) {
-        indexFile(index, _id, path, contentType, null);
+        // if routing is not given, it is logically the same as the document id (for shard selection)
+        indexFile(index, _id, path, contentType, _id);
     }
+
     public void indexFile(String index, String _id, Path path, String contentType, String routing) {
+        indexFile(index, _id, path, contentType, routing, Map.of());
+    }
+
+    public void indexFile(String index, String _id, Path path, String contentType, String routing, Map<String, Object> metadata) {
         Document document = DocumentBuilder.createDoc(_id)
                 .with(path)
                 .with(new Project(index))
+                .with(metadata)
                 .ofContentType(contentType)
                 .withParentId(routing)
                 .withRootId(routing)
                 .withContentLength(10)
                 .build();
-        if (routing == null) {
+        if (routing == null || routing.equals(_id)) {
             indexFile(index, document);
         } else {
             Document rootDocument = DocumentBuilder.createDoc(routing).with(path).with(new Project(index)).build();
@@ -51,6 +59,7 @@ public class MockIndexer {
     public void indexFile(String index, Document document) {
         List<String> sourceExcludes = List.of("content", "content_translated");
         when(mockIndexer.get(index, document.getId())).thenReturn(document);
+        when(mockIndexer.get(index, document.getId(), document.getId())).thenReturn(document);
         when(mockIndexer.get(index, document.getId(), sourceExcludes)).thenReturn(document);
         when(mockIndexer.get(index, document.getId(), document.getId(), sourceExcludes)).thenReturn(document);
     }

@@ -1,8 +1,6 @@
 package org.icij.datashare.mode;
 
 import net.codestory.http.routes.Routes;
-import org.icij.datashare.db.JooqRepository;
-import org.icij.datashare.db.RepositoryFactoryImpl;
 import org.icij.datashare.session.LocalUserFilter;
 import org.icij.datashare.web.*;
 
@@ -36,6 +34,7 @@ public class LocalMode extends CommonMode {
                 add(PluginResource.class).
                 add(ExtensionResource.class).
                 add(ProjectResource.class).
+                add(FtmResource.class).
                 add(NoteResource.class).
                 add(NerResource.class).
                 filter(IndexWaiterFilter.class).

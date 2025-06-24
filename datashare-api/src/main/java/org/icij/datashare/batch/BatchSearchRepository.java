@@ -18,6 +18,7 @@ import static org.icij.datashare.text.ProjectProxy.fromNameStringList;
 public interface BatchSearchRepository extends Closeable {
     boolean save(BatchSearch batchSearch);
     boolean saveResults(String batchSearchId, String query, List<Document> documents);
+    boolean saveResults(String batchSearchId, String query, List<Document> documents, boolean isFirstScroll);
     boolean setState(String batchSearchId, BatchSearch.State state);
     boolean setState(String batchSearchId, SearchException error);
     boolean deleteAll(User user);
@@ -38,13 +39,12 @@ public interface BatchSearchRepository extends Closeable {
     BatchSearch get(User user, String batchId);
     BatchSearch get(User user, String batchId, boolean withQueries);
 
-    Map<String,Integer> getQueries(User user, String batchId, int from, int size, String search, String orderBy);
-
-    Map<String,Integer> getQueries(User user, String batchId, int from, int size, String search, String orderBy, int maxResults);
+    Map<String,Integer> getQueries(User user, String batchId, int from, int size, String search, String sort, String order);
+    Map<String,Integer> getQueries(User user, String batchId, int from, int size, String search, String sort, String order, int maxResults);
 
     boolean reset(String batchId);
     @JsonIgnoreProperties(ignoreUnknown = true)
-    class WebQuery extends WebQueryPagination{
+    class WebQuery extends WebQueryPagination {
         public static final String DEFAULT_SORT_FIELD = "doc_nb";
         public final String query;
         public final String field;
@@ -84,10 +84,7 @@ public interface BatchSearchRepository extends Closeable {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             WebQuery that = (WebQuery) o;
-            return from == that.from &&
-                    size == that.size &&
-                    Objects.equals(sort, that.sort) &&
-                    Objects.equals(order, that.order) &&
+            return super.equals(that) &&
                     Objects.equals(query,that.query) &&
                     Objects.equals(field,that.field) &&
                     Objects.equals(queries, that.queries) &&
@@ -100,7 +97,7 @@ public interface BatchSearchRepository extends Closeable {
         }
 
         @Override
-        public int hashCode() { return Objects.hash(sort, order, query, field, from, size, queries, project, batchDate, state, publishState, contentTypes, queriesExcluded); }
+        public int hashCode() { return Objects.hash(super.hashCode(), query, field, queries, project, batchDate, state, publishState, contentTypes, queriesExcluded); }
         public boolean hasFilteredContentTypes() { return contentTypes !=null && !contentTypes.isEmpty();}
         public boolean hasFilteredQueries() { return queries !=null && !queries.isEmpty();}
         public boolean hasFilteredProjects() { return project !=null && !project.isEmpty();}

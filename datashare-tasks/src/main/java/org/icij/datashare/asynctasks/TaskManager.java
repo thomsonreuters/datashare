@@ -1,11 +1,12 @@
 package org.icij.datashare.asynctasks;
 
+import org.icij.datashare.Entity;
 import org.icij.datashare.asynctasks.bus.amqp.CancelledEvent;
 import org.icij.datashare.asynctasks.bus.amqp.ErrorEvent;
-import org.icij.datashare.asynctasks.bus.amqp.TaskError;
 import org.icij.datashare.asynctasks.bus.amqp.ProgressEvent;
 import org.icij.datashare.asynctasks.bus.amqp.ResultEvent;
 import org.icij.datashare.asynctasks.bus.amqp.TaskEvent;
+import org.icij.datashare.batch.BatchSearchRecord;
 import org.icij.datashare.user.User;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,51 +14,123 @@ import org.slf4j.LoggerFactory;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.Serializable;
-import java.util.HashMap;
+import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
+import static org.icij.datashare.asynctasks.Task.State.NON_FINAL_STATES;
 
+/**
+ * Task manager interface with default methods common for all managers implementations.
+ */
 public interface TaskManager extends Closeable {
+    int POLLING_INTERVAL = 5000;
     Logger logger = LoggerFactory.getLogger(TaskManager.class);
+    <V extends Serializable> Task<V> getTask(String taskId) throws IOException, UnknownTask;
+    <V extends Serializable> Task<V> clearTask(String taskId) throws IOException, UnknownTask;
+    boolean stopTask(String taskId) throws IOException, UnknownTask;
 
-    boolean stopTask(String taskId);
-    <V> Task<V> clearTask(String taskId);
-    boolean shutdownAndAwaitTermination(int timeout, TimeUnit timeUnit) throws InterruptedException;
-    <V> Task<V> getTask(String taskId);
-    List<Task<?>> getTasks();
-    List<Task<?>> getTasks(User user, Pattern pattern);
-    List<Task<?>> clearDoneTasks();
-    void clear();
-    boolean save(Task<?> task);
-    void enqueue(Task<?> task) throws IOException;
+    Stream<Task<?>> getTasks(TaskFilters filters) throws IOException;
+    // clearDoneTasks keeps a List return type otherwise tasks are cleared unless the stream is consumed
+    List<Task<?>> clearDoneTasks(TaskFilters filter) throws IOException;
+    Group getTaskGroup(String taskId) throws IOException, UnknownTask;
+    boolean shutdown() throws IOException;
 
-    static List<Task<?>> getTasks(Stream<Task<?>> stream, User user, Pattern pattern) {
-        return stream.
-                filter(t -> user.equals(t.getUser())).
-                filter(t -> pattern.matcher(t.name).matches()).
-                collect(toList());
+    void clear() throws IOException;
+
+    boolean getHealth() throws IOException;
+
+    int getTerminationPollingInterval();
+
+    default Stream<Task<?>> getTasks() throws IOException {
+        return getTasks(TaskFilters.empty());
     }
 
-    default Map<String, Boolean> stopAllTasks(User user) {
-        return getTasks().stream().
-                filter(t -> user.equals(t.getUser())).
-                filter(t -> t.getState() == Task.State.RUNNING || t.getState() == Task.State.QUEUED).collect(
-                        toMap(t -> t.id, t -> stopTask(t.id)));
+    default Stream<Task<?>> getTasks(TaskFilters filters, Stream<BatchSearchRecord> batchSearchRecords) throws IOException {
+        Stream<Task<? extends Serializable>> userTasks = getTasks(filters);
+        // Remove any filter on task's user. This allows to display batch search records from other users.
+        TaskFilters filtersWithoutUser = filters.withUser(null);
+        // The list of batch search records must be converted to a list of task which allow us to apply the same task filters.
+        Stream<Task<Integer>> batchSearchTasks = batchSearchRecords.map(TaskManager::taskify).filter(filtersWithoutUser::filter);
+        // Merge the list of tasks and deduplicate them by id
+        return Stream.concat(userTasks, batchSearchTasks)
+            .collect(toMap(
+                // We deduplicate tasks by id
+                Entity::getId,
+                task -> task,
+                // Get the first in priority
+                (first, second) -> first,
+                LinkedHashMap::new
+            ))
+            .values()
+                .stream()
+                .map(t -> (Task<?>)t);
     }
 
+    default boolean awaitTermination(int timeout, TimeUnit timeUnit) throws InterruptedException, IOException {
+        return !waitTasksToBeDone(timeout, timeUnit).isEmpty();
+    }
 
+    default Map<String, Boolean> stopTasks(User user) throws IOException {
+        return stopTasks(TaskFilters.empty().withUser(user));
+    }
+
+    default Map<String, Boolean> stopTasks(TaskFilters filters) throws IOException {
+        TaskFilters filterNotCompleted = filters.withStates(NON_FINAL_STATES);
+        Stream<Task<?>> taskStream = getTasks(filterNotCompleted);
+        return taskStream.collect(toMap(t -> t.id, t -> {
+            try {
+                return stopTask(t.id);
+            } catch (IOException | UnknownTask e) {
+                logger.error("cannot stop task {}", t.id, e);
+                return false;
+            }
+        }));
+    }
+
+    default List<Task<?>> clearDoneTasks() throws IOException {
+        return clearDoneTasks(TaskFilters.empty());
+    }
+
+    /**
+     * This is a "inner method" that is used in the template method for start(task).
+     * It saves the method in the inner persistent state of TaskManagers implementations.
+     *
+     * @param task to be saved in persistent state
+     * @throws IOException if a network error occurs
+     */
+    <V extends Serializable> void insert(Task<V> task, Group group) throws IOException, TaskAlreadyExists;
+    <V extends Serializable> void update(Task<V> task) throws IOException, UnknownTask;
+
+    /**
+     * This is a "inner method" that is used in the template method for start(task).
+     * It put the task in the task queue for workers.
+     * @param task task to be queued
+     * @throws IOException if a network error occurs
+     */
+    <V extends Serializable> void enqueue(Task<V> task) throws IOException;
+
+    // TaskResource and pipeline tasks
+    default String startTask(Class<?> taskClass, User user, Map<String, Object> properties) throws IOException {
+        return startTask(new Task<>(taskClass.getName(), user, properties), new Group(taskClass.getAnnotation(TaskGroup.class).value()));
+    }
+
+    // BatchSearchResource and WebApp for batch searches
+    default String startTask(String uuid, Class<?> taskClass, User user, Map<String, Object> properties) throws IOException, TaskAlreadyExists {
+        return startTask(new Task<>(uuid, taskClass.getName(), user, properties), new Group(taskClass.getAnnotation(TaskGroup.class).value()));
+    }
+
+    // for tests
     default String startTask(String taskName, User user, Map<String, Object> properties) throws IOException {
-        return startTask(new Task<>(taskName, user, properties));
+        return startTask(new Task<>(taskName, user, properties), new Group(TaskGroupType.Java));
     }
-
-    default  String startTask(String id, String taskName, User user) throws IOException {
-        return startTask(new Task<>(id, taskName, user, new HashMap<>()));
+    // for tests
+    default String startTask(String taskName, User user, Group group, Map<String, Object> properties) throws IOException {
+        return startTask(new Task<>(taskName, user, properties), group);
     }
 
     /**
@@ -65,48 +138,52 @@ public interface TaskManager extends Closeable {
      * it in the memory/redis/AMQP queue and return the id. Else it will not enqueue the task and return null.
      *
      * @param taskView: the task description.
+     * @param group: task group
      * @return task id if it was new and has been saved else null
      * @throws IOException in case of communication failure with Redis or AMQP broker
+     * @throws TaskAlreadyExists when the task has already been started
      */
-    default <V> String startTask(Task<V> taskView) throws IOException {
-        boolean saved = save(taskView);
-        if (saved) {
-            taskView.queue();
-            enqueue(taskView);
-        }
-        return saved ? taskView.id: null;
+    default <V extends Serializable> String startTask(Task<V> taskView, Group group) throws IOException, TaskAlreadyExists {
+        insert(taskView, group);
+        taskView.queue();
+        enqueue(taskView);
+        return taskView.id;
     }
 
-    default <V extends Serializable> Task<V> setResult(ResultEvent<V> e) {
+    default <V extends Serializable> String startTask(Task<V> taskView) throws IOException, TaskAlreadyExists {
+        return startTask(taskView, null);
+    }
+
+    default <V extends Serializable> Task<V> setResult(ResultEvent<V> e) throws IOException, UnknownTask {
         Task<V> taskView = getTask(e.taskId);
         if (taskView != null) {
             logger.info("result event for {}", e.taskId);
             taskView.setResult(e.result);
-            save(taskView);
+            update(taskView);
         } else {
             logger.warn("no task found for result event {}", e.taskId);
         }
         return taskView;
     }
 
-    default <V extends Serializable> Task<V> setError(ErrorEvent e) {
+    default <V extends Serializable> Task<V> setError(ErrorEvent e) throws IOException, UnknownTask {
         Task<V> taskView = getTask(e.taskId);
         if (taskView != null) {
             logger.info("error event for {}", e.taskId);
             taskView.setError(e.error);
-            save(taskView);
+            update(taskView);
         } else {
             logger.warn("no task found for error event {}", e.taskId);
         }
         return taskView;
     }
 
-    default Task<?> setCanceled(CancelledEvent e) {
-        Task<?> taskView = getTask(e.taskId);
+    default <V extends Serializable> Task<V> setCanceled(CancelledEvent e) throws IOException, UnknownTask {
+        Task<V> taskView = getTask(e.taskId);
         if (taskView != null) {
             logger.info("canceled event for {}", e.taskId);
             taskView.cancel();
-            save(taskView);
+            update(taskView);
             if (e.requeue) {
                 try {
                     enqueue(taskView);
@@ -120,35 +197,89 @@ public interface TaskManager extends Closeable {
         return taskView;
     }
 
-    default Task<?> setProgress(ProgressEvent e) {
+    default <V extends Serializable> Task<V> setProgress(ProgressEvent e) throws IOException, UnknownTask {
         logger.debug("progress event for {}", e.taskId);
-        Task<?> taskView = getTask(e.taskId);
+        Task<V> taskView = getTask(e.taskId);
         if (taskView != null) {
             taskView.setProgress(e.progress);
-            save(taskView);
+            update(taskView);
         }
         return taskView;
     }
 
-    default <V extends Serializable> Task<?> handleAck(TaskEvent e) {
-        if (e instanceof CancelledEvent) {
-            return setCanceled((CancelledEvent) e);
+    default <V extends Serializable> Task<V> handleAck(TaskEvent e) {
+        try {
+            if (e instanceof CancelledEvent ce) {
+                return setCanceled(ce);
+            }
+            if (e instanceof ResultEvent) {
+                return setResult((ResultEvent<V>) e);
+            }
+            if (e instanceof ErrorEvent ee) {
+                return setError(ee);
+            }
+            if (e instanceof ProgressEvent pe) {
+                return setProgress(pe);
+            }
+            logger.warn("received event not handled {}", e);
+            return null;
+        } catch (IOException | UnknownTask ioe) {
+            throw new TaskEventHandlingException(ioe);
         }
-        if (e instanceof ResultEvent) {
-            return setResult(((ResultEvent<V>) e));
-        }
-        if (e instanceof ErrorEvent) {
-            return setError((ErrorEvent) e);
-        }
-        if (e instanceof ProgressEvent) {
-            return setProgress((ProgressEvent)e);
-        }
-        logger.warn("received event not handled {}", e);
-        return null;
     }
 
-    default void foo(String taskId, StateLatch stateLatch) {
+    /**
+     * wait for all the tasks to have a result.
+     * This method will poll the task list. So if there are a lot of tasks or if tasks are
+     * containing a lot of information, this method call could be very intensive on network and CPU.
+     *
+     * @param timeout amount for the timeout
+     * @param timeUnit unit of the timeout
+     * @return the list of unfinished/alive tasks
+     * @throws IOException if the task list cannot be retrieved because of a network failure.
+     */
+    default List<Task<?>> waitTasksToBeDone(int timeout, TimeUnit timeUnit) throws IOException {
+        long startTime = System.currentTimeMillis();
+        List<Task<?>> unfinishedTasks = getTasks().filter(t -> !t.isFinished()).toList();
+        while (System.currentTimeMillis() - startTime < timeUnit.toMillis(timeout) && !unfinishedTasks.isEmpty()) {
+            unfinishedTasks = getTasks().filter(t -> !t.isFinished()).toList();
+            try {
+                Thread.sleep(getTerminationPollingInterval());
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return unfinishedTasks;
+    }
+
+    // for tests
+    default void setLatch(String taskId, StateLatch stateLatch) throws IOException, UnknownTask {
         getTask(taskId).setLatch(stateLatch);
     }
 
+    class TaskEventHandlingException extends RuntimeException {
+        public TaskEventHandlingException(Exception cause) {
+            super(cause);
+        }
+    }
+
+    static Task<Integer> taskify(BatchSearchRecord batchSearchRecord) {
+        String name = "org.icij.datashare.tasks.BatchSearchRunnerProxy";
+        Map<String, Object> batchRecord = Map.of("batchRecord", batchSearchRecord);
+        Task<Integer> task = new Task<>(batchSearchRecord.uuid, name, batchSearchRecord.user, batchRecord);
+        // Build a state map between task and batch search record
+        Map<BatchSearchRecord.State, Task.State> stateMap = new EnumMap<>(BatchSearchRecord.State.class);
+        stateMap.put(BatchSearchRecord.State.QUEUED, Task.State.QUEUED);
+        stateMap.put(BatchSearchRecord.State.RUNNING, Task.State.RUNNING);
+        stateMap.put(BatchSearchRecord.State.SUCCESS, Task.State.DONE);
+        stateMap.put(BatchSearchRecord.State.FAILURE, Task.State.ERROR);
+        // Set the task state to the same state as the batch search record
+        task.setState(stateMap.get(batchSearchRecord.state));
+        // Set the task result
+        TaskResult<Integer> result = new TaskResult<>(batchSearchRecord.nbResults);
+        task.setResult(result);
+        // Set the correct creation date
+        task.setCreatedAt(batchSearchRecord.date);
+        return task;
+    }
 }

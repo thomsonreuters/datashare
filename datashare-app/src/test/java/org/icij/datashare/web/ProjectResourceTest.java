@@ -4,6 +4,8 @@ import net.codestory.http.filters.basic.BasicAuthFilter;
 import net.codestory.http.security.Users;
 import org.icij.datashare.PropertiesProvider;
 import org.icij.datashare.Repository;
+import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.asynctasks.TaskManager;
 import org.icij.datashare.cli.Mode;
 import org.icij.datashare.db.JooqRepository;
 import org.icij.datashare.session.DatashareUser;
@@ -26,7 +28,6 @@ import org.mockito.Mock;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.sql.SQLException;
 import java.util.*;
 
 import static java.util.Arrays.asList;
@@ -39,6 +40,7 @@ public class ProjectResourceTest extends AbstractProdWebServerTest {
     @Mock Repository repository;
     @Mock JooqRepository jooqRepository;
     @Mock Indexer indexer;
+    @Mock TaskManager taskManager;
     @Rule public TemporaryFolder artifactDir = new TemporaryFolder();
     MemoryDocumentCollectionFactory<Path> documentCollectionFactory;
     PropertiesProvider propertiesProvider;
@@ -54,13 +56,13 @@ public class ProjectResourceTest extends AbstractProdWebServerTest {
                 put("mode", "LOCAL");
             }});
 
-            ProjectResource projectResource = new ProjectResource(repository, indexer, propertiesProvider, documentCollectionFactory);
+            ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
             routes.filter(new LocalUserFilter(propertiesProvider, jooqRepository)).add(projectResource);
         });
     }
 
     private Users get_datashare_users(String uid, List<String> groups) {
-        User user = new User(new HashMap<String, Object>() {
+        User user = new User(new HashMap<>() {
                     {
                         this.put("uid", uid);
                         this.put("groups_by_applications", new HashMap<String, Object>() {
@@ -136,7 +138,7 @@ public class ProjectResourceTest extends AbstractProdWebServerTest {
             PropertiesProvider propertiesProvider = new PropertiesProvider(new HashMap<>() {{
                 put("mode", Mode.SERVER.name());
             }});
-            ProjectResource projectResource = new ProjectResource(repository, indexer, propertiesProvider, documentCollectionFactory);
+            ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
             Users datashareUsers = get_datashare_users(asList("foo", "biz"));
             BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", datashareUsers);
             routes.filter(basicAuthFilter).add(projectResource);
@@ -258,12 +260,20 @@ public class ProjectResourceTest extends AbstractProdWebServerTest {
     }
 
     @Test
-    public void test_delete_project() throws SQLException {
+    public void test_delete_project() {
         Project foo = new Project("local-datashare");
         when(repository.getProjects(any())).thenReturn(List.of(foo));
         when(repository.deleteAll("local-datashare")).thenReturn(true).thenReturn(false);
         delete("/api/project/local-datashare").should().respond(204);
         delete("/api/project/local-datashare").should().respond(204);
+    }
+
+    @Test
+    public void test_delete_project_even_without_index() throws IOException {
+        Project foo = new Project("foo");
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(indexer.deleteAll(foo.getId())).thenReturn(false);
+        delete("/api/project/foo").should().respond(204);
     }
 
     @Test
@@ -285,7 +295,7 @@ public class ProjectResourceTest extends AbstractProdWebServerTest {
                 put("artifactDir", artifactDir.getRoot().toString());
             }});
 
-            ProjectResource projectResource = new ProjectResource(repository, indexer, propertiesProvider, documentCollectionFactory);
+            ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
             routes.filter(new LocalUserFilter(propertiesProvider, jooqRepository)).add(projectResource);
         });
 
@@ -304,7 +314,7 @@ public class ProjectResourceTest extends AbstractProdWebServerTest {
         configure(routes -> {
             PropertiesProvider propertiesProvider = new PropertiesProvider(Collections.singletonMap("mode", Mode.SERVER.name()));
             routes.filter(new YesBasicAuthFilter(propertiesProvider))
-                    .add(new ProjectResource(repository, indexer, propertiesProvider, documentCollectionFactory));
+                    .add(new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory));
         });
         when(repository.deleteAll("hacker-datashare")).thenReturn(true);
         when(repository.deleteAll("projectId")).thenReturn(true);
@@ -313,12 +323,14 @@ public class ProjectResourceTest extends AbstractProdWebServerTest {
     }
 
     @Test
-    public void test_delete_all_projects() throws SQLException {
+    public void test_delete_all_projects() throws Exception{
         Project foo = new Project("foo");
         Project bar = new Project("bar");
+        Task<?> task = new Task<>("name", User.local(), new HashMap<>());
         when(repository.getProjects(any())).thenReturn(asList(foo, bar));
         when(repository.deleteAll("foo")).thenReturn(true).thenReturn(false);
         when(repository.deleteAll("bar")).thenReturn(true).thenReturn(false);
+        when(taskManager.clearDoneTasks()).thenReturn(List.of(task)).thenReturn(List.of());
         delete("/api/project/").should().respond(204);
     }
 

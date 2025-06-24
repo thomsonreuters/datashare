@@ -1,31 +1,23 @@
 package org.icij.datashare.asynctasks;
 
 
+import java.util.List;
 import org.icij.datashare.PropertiesProvider;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpInterlocutor;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpQueue;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpServerRule;
+import org.icij.datashare.tasks.RoutingStrategy;
 import org.icij.datashare.user.User;
 import org.icij.extract.redis.RedissonClientFactory;
 import org.icij.task.Options;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Test;
+import org.junit.*;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
-import org.redisson.Redisson;
-import org.redisson.RedissonBlockingQueue;
-import org.redisson.RedissonMap;
 import org.redisson.api.RedissonClient;
-import org.redisson.command.CommandSyncService;
-import org.redisson.liveobject.core.RedissonObjectBuilder;
 
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,38 +51,27 @@ public class TaskManagersIntTest {
                 "messageBusAddress", "amqp://admin:admin@rabbitmq"));
         final RedissonClient redissonClient = new RedissonClientFactory().withOptions(
             Options.from(propertiesProvider.getProperties())).create();
-        Map<String, Task<?>> amqpTasks = new RedissonMap<>(new TaskManagerRedis.TaskViewCodec(),
-            new CommandSyncService(((Redisson) redissonClient).getConnectionManager(),
-                new RedissonObjectBuilder(redissonClient)),
-            "tasks:queue:test",
-            redissonClient,
-            null,
-            null
-        );
-        AMQP = new AmqpInterlocutor(propertiesProvider);
-        AMQP.createAmqpChannelForPublish(AmqpQueue.TASK);
-        AMQP.createAmqpChannelForPublish(AmqpQueue.WORKER_EVENT);
-        AMQP.createAmqpChannelForPublish(AmqpQueue.MANAGER_EVENT);
-        BlockingQueue<Task<?>> taskQueue = new RedissonBlockingQueue<>(new TaskManagerRedis.TaskViewCodec(),
-                new CommandSyncService(((Redisson) redissonClient).getConnectionManager(),
-                        new RedissonObjectBuilder(redissonClient)), "tasks:queue:test", redissonClient);
+
+        AmqpQueue[] queues = {AmqpQueue.MANAGER_EVENT, AmqpQueue.WORKER_EVENT, AmqpQueue.TASK};
+        AMQP = new AmqpInterlocutor(propertiesProvider, queues);
+        AMQP.deleteQueues(queues);
         EventWaiter amqpWaiter = new EventWaiter(2); // default: progress, result
         EventWaiter redisWaiter = new EventWaiter(2); // default: progress, result
 
         return asList(new Object[][]{
             {
-                (Creator<TaskManager>) () -> new TaskManagerAmqp(AMQP, amqpTasks, amqpWaiter::countDown),
+                (Creator<TaskManager>) () -> new TaskManagerAmqp(AMQP, new TaskRepositoryRedis(redissonClient), RoutingStrategy.UNIQUE, amqpWaiter::countDown),
                 (Creator<TaskSupplier>) () -> new TaskSupplierAmqp(AMQP),
                 amqpWaiter
             },
             {
-                (Creator<TaskManager>) () -> new TaskManagerRedis(redissonClient, taskQueue,
-                    "tasks:map:test", redisWaiter::countDown),
-                (Creator<TaskSupplier>) () -> new TaskSupplierRedis(redissonClient, taskQueue),
+                (Creator<TaskManager>) () -> new TaskManagerRedis(redissonClient,
+                        new TaskRepositoryRedis(redissonClient, "tasks:map:test"), RoutingStrategy.UNIQUE, redisWaiter::countDown),
+                (Creator<TaskSupplier>) () -> new TaskSupplierRedis(redissonClient),
                 redisWaiter
             }
-    });
-}
+        });
+    }
 
     public TaskManagersIntTest(Creator<TaskManager> managerCreator, Creator<TaskSupplier> taskSupplierCreator, EventWaiter eventWaiter) {
         this.taskManagerCreator = managerCreator;
@@ -101,24 +82,22 @@ public class TaskManagersIntTest {
     @Test(timeout = 10000)
     public void test_stop_running_task() throws Exception {
         eventWaiter.setWaiter(new CountDownLatch(2)); // 1 progress, 1 cancelled
-        String taskViewId = taskManager.startTask(TestFactory.SleepForever.class.getName(), User.local(), new HashMap<>());
+        String taskViewId = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
 
         taskInspector.awaitStatus(taskViewId, Task.State.RUNNING, 1, SECONDS);
-
         taskManager.stopTask(taskViewId);
         taskInspector.awaitStatus(taskViewId, Task.State.CANCELLED, 1, SECONDS);
         eventWaiter.await();
 
-        assertThat(taskManager.getTasks()).hasSize(1);
-        assertThat(taskManager.getTasks().get(0).getState()).isEqualTo(Task.State.CANCELLED);
+        List<Task<?>> tasks = taskManager.getTasks().toList();
+        assertThat(tasks).hasSize(1);
+        assertThat(tasks.get(0).getState()).isEqualTo(Task.State.CANCELLED);
     }
 
     @Test(timeout = 10000)
     public void test_stop_queued_task() throws Exception {
-        eventWaiter.setWaiter(new CountDownLatch(3)); // 1 progress, 2 cancelled
-
-        String tv1Id = taskManager.startTask(TestFactory.SleepForever.class.getName(), User.local(), new HashMap<>());
-        String tv2Id = taskManager.startTask(TestFactory.SleepForever.class.getName(), User.local(), new HashMap<>());
+        String tv1Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
+        String tv2Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
 
         taskInspector.awaitStatus(tv1Id, Task.State.RUNNING, 1, SECONDS);
         taskManager.stopTask(tv2Id);
@@ -126,9 +105,83 @@ public class TaskManagersIntTest {
         taskInspector.awaitStatus(tv1Id, Task.State.CANCELLED, 1, SECONDS);
         taskInspector.awaitStatus(tv2Id, Task.State.CANCELLED, 1, SECONDS);
 
-        assertThat(taskManager.getTasks()).hasSize(2);
-        assertThat(taskManager.getTasks().get(0).getState()).isEqualTo(Task.State.CANCELLED);
-        assertThat(taskManager.getTasks().get(1).getState()).isEqualTo(Task.State.CANCELLED);
+        assertThat(taskManager.getTasks().toList()).hasSize(2);
+        assertThat(taskManager.getTask(tv1Id).getState()).isEqualTo(Task.State.CANCELLED);
+        assertThat(taskManager.getTask(tv2Id).getState()).isEqualTo(Task.State.CANCELLED);
+    }
+
+    @Test(timeout = 10000)
+    public void test_stop_all_tasks() throws Exception {
+        String tv1Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
+        String tv2Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
+
+        taskInspector.awaitStatus(tv1Id, Task.State.RUNNING, 1, SECONDS);
+        taskManager.stopTasks(User.local());
+        taskInspector.awaitStatus(tv1Id, Task.State.CANCELLED, 1, SECONDS);
+        taskInspector.awaitStatus(tv2Id, Task.State.CANCELLED, 1, SECONDS);
+
+        assertThat(taskManager.getTasks().toList()).hasSize(2);
+        assertThat(taskManager.getTask(tv1Id).getState()).isEqualTo(Task.State.CANCELLED);
+        assertThat(taskManager.getTask(tv2Id).getState()).isEqualTo(Task.State.CANCELLED);
+    }
+
+    @Test(timeout = 10000)
+    public void test_stop_all_tasks_with_filter() throws Exception {
+        String tv1Id = taskManager.startTask(TestFactory.AnotherSleepForever.class, User.local(), new HashMap<>());
+        String tv2Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
+
+        taskInspector.awaitStatus(tv1Id, Task.State.RUNNING, 1, SECONDS);
+        taskManager.stopTasks(TaskFilters.empty().withUser(User.local()).withNames(".*Another.*"));
+        taskInspector.awaitStatus(tv1Id, Task.State.CANCELLED, 1, SECONDS);
+
+        assertThat(taskManager.getTasks().toList()).hasSize(2);
+        assertThat(taskManager.getTask(tv1Id).getState()).isEqualTo(Task.State.CANCELLED);
+        assertThat(taskManager.getTask(tv2Id).getState()).isEqualTo(Task.State.RUNNING);
+
+        taskManager.stopTasks(User.local());
+        taskInspector.awaitStatus(tv2Id, Task.State.CANCELLED, 1, SECONDS);
+    }
+
+
+    @Test(timeout = 10000)
+    public void test_stop_all_wait_clear_done_tasks() throws Exception {
+        String tv1Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
+        String tv2Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
+
+        taskInspector.awaitStatus(tv1Id, Task.State.RUNNING, 1, SECONDS);
+        taskManager.stopTasks(User.local());
+        taskInspector.awaitStatus(tv1Id, Task.State.CANCELLED, 1, SECONDS);
+        taskInspector.awaitStatus(tv2Id, Task.State.CANCELLED, 1, SECONDS);
+
+        taskManager.clearDoneTasks();
+
+        assertThat(taskManager.getTasks().toList()).isEmpty();
+    }
+
+    @Test(timeout = 10000)
+    public void test_stop_all_wait_clear_done_tasks_not_cancellable_task() throws Exception {
+        String tv1Id = taskManager.startTask(TestFactory.Sleep.class, User.local(), Map.of("duration", 3000));
+        String tv2Id = taskManager.startTask(TestFactory.SleepForever.class, User.local(), new HashMap<>());
+
+        taskInspector.awaitStatus(tv1Id, Task.State.RUNNING, 1, SECONDS);
+        taskManager.stopTasks(User.local());
+
+        assertThat(taskManager.getTask(tv1Id).getState()).isEqualTo(Task.State.RUNNING);
+        assertThat(taskManager.getTask(tv2Id).getState()).isEqualTo(Task.State.CREATED);
+
+        taskManager.clearDoneTasks();
+
+        assertThat(taskManager.getTasks().toList()).isNotEmpty();
+    }
+
+    @Test(timeout = 10000)
+    public void test_await_tasks_termination() throws Exception {
+        String tv1Id = taskManager.startTask(TestFactory.Sleep.class, User.local(), Map.of("duration", 100));
+        String tv2Id = taskManager.startTask(TestFactory.Sleep.class, User.local(), Map.of("duration", 200));
+
+        taskManager.awaitTermination(2, SECONDS);
+        assertThat(taskManager.getTask(tv1Id).getState()).isEqualTo(Task.State.DONE);
+        assertThat(taskManager.getTask(tv2Id).getState()).isEqualTo(Task.State.DONE);
     }
 
     @Before
@@ -143,9 +196,9 @@ public class TaskManagersIntTest {
 
     @After
     public void tearDown() throws Exception {
+        taskWorker.close();
         taskManager.clear();
         taskManager.close();
-        taskWorker.close();
         executor.shutdownNow();
         executor.awaitTermination(1, SECONDS);
     }

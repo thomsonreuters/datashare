@@ -20,14 +20,18 @@ import net.codestory.http.filters.auth.CookieAuthFilter;
 import net.codestory.http.payload.Payload;
 import net.codestory.http.security.SessionIdStore;
 import net.codestory.http.security.User;
+import net.codestory.http.security.Users;
 import org.icij.datashare.PropertiesProvider;
+import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.Date;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 
 import static java.lang.String.format;
@@ -36,16 +40,24 @@ import static java.util.Optional.ofNullable;
 
 /**
  * This class is responsible for OAuth2 authentication.
+ * Note that users object provided here are *not* a user database
+ * but a session user cache that should be discarded after the session
+ * ends (for example with a Redis key ttl).
+ *
  * If you need to add custom processing for saved user session
- * feel free to add a withYourParams() method. see {@link #processOAuthApiResponse(Response) processOAuthApiResponse}
+ * feel free to override createUser or even processOAuthApiResponse.
+ * see {@link #processOAuthApiResponse(Response) processOAuthApiResponse}
+ * see {@link #createUser(Map)}
+ *
  */
 @Singleton
-public final class OAuth2CookieFilter extends CookieAuthFilter {
+public class OAuth2CookieFilter extends CookieAuthFilter {
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
     public static final String REQUEST_CODE_KEY = "code";
     public static final String REQUEST_STATE_KEY = "state";
 
+    protected final String oauthDefaultProject;
     private final DefaultApi20 defaultOauthApi;
     private final Integer oauthTtl;
     private final String oauthApiUrl;
@@ -55,7 +67,6 @@ public final class OAuth2CookieFilter extends CookieAuthFilter {
     private final String oauthTokenUrl;
     private final String oauthClientId;
     private final String oauthClientSecret;
-    private final String oauthDefaultProject;
     private final String oauthScope;
     private final String oauthClaimIdAttribute;
 
@@ -143,11 +154,11 @@ public final class OAuth2CookieFilter extends CookieAuthFilter {
         return Payload.seeOther(this.validRedirectUrl(this.readRedirectUrlInCookie(context))).withCookie(this.authCookie(this.buildCookie(datashareUser, "/")));
     }
 
-    private DatashareUser processOAuthApiResponse(Response oauthApiResponse) throws IOException {
+    protected DatashareUser processOAuthApiResponse(Response oauthApiResponse) throws IOException {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode root = (ObjectNode) mapper.readTree(oauthApiResponse.getBody());
         Map<String, Object> userMap = mapper.convertValue(root, new TypeReference<>() {});
-        if (!oauthClaimIdAttribute.isEmpty()) {
+        if (!oauthClaimIdAttribute.isEmpty()){
             if (userMap.get(oauthClaimIdAttribute) == null) {
                 logger.error("The attribute {} does not exist in the response body.", oauthClaimIdAttribute);
                 throw new BadRequestException();
@@ -156,69 +167,14 @@ public final class OAuth2CookieFilter extends CookieAuthFilter {
             userMap.put("id", id);
             userMap.put("uid", id);
         }
-
-        // Retrieve the existing user from the database via id or uid
-        String login = (String) userMap.get("id");
-        DatashareUser existingUser = (DatashareUser) writableUsers().find(login);
-
-        if (existingUser != null) {
-            // Merge existing details with the new data from the OAuth response
-            Map<String, Object> existingDetails = existingUser.getDetails();
-            userMap.putAll(existingDetails); // Ensures existing details are preserved
-        } else {
-            logger.info("No existing user found for login: {}", login);
-        }
-
-        // Check for the default project and groups_by_applications handling
-        if (!oauthDefaultProject.isEmpty()) {
-            userMap.put("provider", "icij");
-
-            // Check if groups_by_applications already exists in userMap
-            Object groupsByApplicationsObj = userMap.get("groups_by_applications");
-
-            Map<String, Object> groupsByApplications;
-
-            if (groupsByApplicationsObj instanceof Map) {
-                groupsByApplications = (Map<String, Object>) groupsByApplicationsObj;
-            } else {
-                // Initialize a new map if groups_by_applications is missing or is of a wrong type
-                groupsByApplications = new HashMap<>();
-                userMap.put("groups_by_applications", groupsByApplications);
-            }
-
-            // Check if datashare exists in groups_by_applications
-            Object datashareObj = groupsByApplications.get("datashare");
-
-            List<String> datashare;
-
-            if (datashareObj instanceof List) {
-                datashare = (List<String>) datashareObj;
-            } else {
-                // If datashare does not exist or is not a list, create a new one
-                datashare = new ArrayList<>();
-                groupsByApplications.put("datashare", datashare);
-            }
-
-            // Add the default project only if it is not already in the list
-            if (!datashare.contains(oauthDefaultProject)) {
-                datashare.add(oauthDefaultProject);
-                logger.info("Appended default project {} to user {}'s datashare.", oauthDefaultProject, login);
-            } else {
-                logger.info("Default project {} already exists for user {} in datashare.", oauthDefaultProject, login);
-            }
-        }
-
-        // Save the updated user back to the database
-        DatashareUser datashareUser = new DatashareUser(userMap);
-        boolean isSaved = writableUsers().saveOrUpdate(datashareUser);
-
-        if (!isSaved) {
-            logger.warn("Failed to save updated user data for login: {}", login);
-        } else {
-            logger.info("Successfully updated user data for login: {}", login);
-        }
-
+        DatashareUser datashareUser = createUser(userMap);
+        ((UsersWritable)users).saveOrUpdate(datashareUser);
         return datashareUser;
+    }
+
+    @NotNull
+    protected DatashareUser createUser(Map<String, Object> userMap) {
+        return new DatashareUser(userMap);
     }
 
     @Override
@@ -250,9 +206,4 @@ public final class OAuth2CookieFilter extends CookieAuthFilter {
     @Override protected String cookieName() { return "_ds_session_id";}
     @Override protected int expiry() { return oauthTtl;}
     @Override protected boolean redirectToLogin(String uri) { return false;}
-    private UsersWritable writableUsers() { return (UsersWritable) users;}
-
-    private static class Datashare {
-
-    }
 }

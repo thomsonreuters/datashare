@@ -5,7 +5,9 @@ import joptsimple.OptionSpec;
 import joptsimple.ValueConverter;
 import org.icij.datashare.PipelineHelper;
 import org.icij.datashare.Stage;
+import org.icij.datashare.user.User;
 import org.slf4j.event.Level;
+import org.icij.datashare.tasks.RoutingStrategy;
 
 import java.io.File;
 import java.net.URI;
@@ -49,6 +51,7 @@ public final class DatashareCliOptions {
     public static final String DATA_DIR_ABBR_OPT = "d";
     public static final String DATA_DIR_OPT = "dataDir";
     public static final String DATA_SOURCE_URL_OPT = "dataSourceUrl";
+    public static final String DEFAULT_OCR_TYPE = "TESSERACT";
     public static final String DEFAULT_PROJECT_ABBR_OPT = "p";
     public static final String DEFAULT_PROJECT_OPT = "defaultProject";
     public static final String DEFAULT_USER_NAME_ABBR_OPT = "u";
@@ -75,7 +78,9 @@ public final class DatashareCliOptions {
     public static final String MESSAGE_BUS_OPT = "messageBusAddress";
     public static final String MODE_ABBR_OPT = "m";
     public static final String MODE_OPT = "mode";
+    public static final String NLP_BATCH_SIZE_OPT = "batchSize";
     public static final String NLP_PARALLELISM_ABBR_OPT = "np";
+    public static final String NLP_MAX_TEXT_LENGTH_OPT = "maxTextLength";
     public static final String NLP_PARALLELISM_OPT = "nlpParallelism";
     public static final String NLP_PIPELINE_ABBR_OPT = "nlpp";
     public static final String NLP_PIPELINE_OPT = "nlpPipeline";
@@ -91,6 +96,7 @@ public final class DatashareCliOptions {
     public static final String OCR_ABBR_OPT = "o";
     public static final String OCR_LANGUAGE_OPT = "ocrLanguage";
     public static final String OCR_OPT = "ocr";
+    public static final String OCR_TYPE_OPT = "ocrType";
     public static final String PARALLELISM_OPT = "parallelism";
     public static final String PARSER_PARALLELISM_ABBR_OPT = "pp";
     public static final String PARSER_PARALLELISM_OPT = "parserParallelism";
@@ -121,6 +127,13 @@ public final class DatashareCliOptions {
     public static final String VERSION_OPT = "version";
     public static final String ARTIFACT_DIR_OPT = "artifactDir";
     public static final String SEARCH_QUERY_OPT = "searchQuery";
+    public static final String TASK_ROUTING_STRATEGY_OPT = "taskRoutingStrategy";
+    public static final String TASK_ROUTING_KEY_OPT = "taskRoutingKey";
+    public static final String OAUTH_USER_PROJECTS_KEY_OPT = "oauthUserProjectsAttribute";
+    public static final String POLLING_INTERVAL_SECONDS_OPT = "pollingInterval";
+    public static final String TASK_REPOSITORY_OPT = "taskRepositoryType";
+    public static final String TASK_MANAGER_POLLING_INTERVAL_OPT = "taskManagerPollingIntervalMilliseconds";
+    public static final String TASK_WORKERS_OPT = "taskWorkers";
 
     private static final Path DEFAULT_DATASHARE_HOME = Paths.get(System.getProperty("user.home"), ".local/share/datashare");
     private static final Integer DEFAULT_NLP_PARALLELISM = 1;
@@ -150,6 +163,8 @@ public final class DatashareCliOptions {
     public static final String DEFAULT_LOG_LEVEL = Level.INFO.toString();
     public static final String DEFAULT_MESSAGE_BUS_ADDRESS = "redis://redis:6379";
     public static final String DEFAULT_NLP_PIPELINE = "CORENLP";
+    public static final int DEFAULT_NLP_BATCH_SIZE = 1024;
+    public static final int DEFAULT_NLP_MAX_TEXT_LENGTH = 1024;
     public static final String DEFAULT_PROTECTED_URI_PREFIX = "/api/";
     public static final String DEFAULT_QUEUE_NAME = "extract:queue";
     public static final String DEFAULT_REDIS_ADDRESS = "redis://redis:6379";
@@ -167,6 +182,10 @@ public final class DatashareCliOptions {
     public static final int DEFAULT_TCP_LISTEN_PORT = 8080;
     public static final int DEFAULT_SESSION_TTL_SECONDS = 43200;
     public static final String DEFAULT_MAX_CONTENT_LENGTH = "20000000";
+    public static final RoutingStrategy DEFAULT_TASK_ROUTING_STRATEGY = RoutingStrategy.UNIQUE;
+    public static final String DEFAULT_POLLING_INTERVAL_SEC = "60";
+    public static final int DEFAULT_TASK_MANAGER_POLLING_INTERVAL = 5000;
+    public static final String DEFAULT_TASK_WORKERS = "1";
 
     // A list of aliases for retro-compatibility when an option changed
     public static final Map<String, String> OPT_ALIASES = Map.ofEntries(
@@ -208,12 +227,21 @@ public final class DatashareCliOptions {
                 .defaultsTo(DEFAULT_USER);
     }
 
+    static void defaultUserProjectKey(OptionParser parser) {
+        parser.acceptsAll(
+                        List.of(OAUTH_USER_PROJECTS_KEY_OPT),
+                "Json field name sent by the Identity Provider that contains user projects.")
+                .withRequiredArg()
+                .ofType(String.class)
+                .defaultsTo(User.DEFAULT_PROJECTS_KEY);
+    }
+
     static void followSymlinks(OptionParser parser) {
         parser.acceptsAll(
                 singletonList(FOLLOW_SYMLINKS_OPT), "Follow symlinks while scanning documents")
                 .withRequiredArg()
                 .ofType(Boolean.class)
-                .defaultsTo(DEFAULT_FOLLOW_SYMLINKS);;
+                .defaultsTo(DEFAULT_FOLLOW_SYMLINKS);
     }
 
     static void cors(OptionParser parser) {
@@ -345,7 +373,7 @@ public final class DatashareCliOptions {
 
     static void artifactDir(OptionParser parser) {
         parser.acceptsAll(
-                asList(ARTIFACT_DIR_OPT),
+                List.of(ARTIFACT_DIR_OPT),
                 "Artifact directory for embedded caching. If not provided datashare will use memory." )
                 .withRequiredArg();
     }
@@ -371,6 +399,22 @@ public final class DatashareCliOptions {
                 "Backend data bus type.")
                 .withRequiredArg().ofType( QueueType.class )
                 .defaultsTo(DEFAULT_BUS_TYPE);
+    }
+
+    public static void taskRoutingStrategy(OptionParser parser) {
+        parser.acceptsAll(
+                singletonList(TASK_ROUTING_STRATEGY_OPT),
+                format("Task Manager routing strategy (%s).", Arrays.toString(RoutingStrategy.values())))
+                .withRequiredArg().ofType( RoutingStrategy.class )
+                .defaultsTo(DEFAULT_TASK_ROUTING_STRATEGY);
+    }
+
+    static void taskRoutingKey(OptionParser parser) {
+        parser.acceptsAll(
+                        singletonList(TASK_ROUTING_KEY_OPT),
+                        "Routing key (and queue suffix) for task worker. If 'Key' is provided " +
+                                "task worker will connect to the queue TASK.Key with 'Key' binding (AMQP).")
+                .withRequiredArg();
     }
 
     static void redisAddress(OptionParser parser) {
@@ -399,6 +443,24 @@ public final class DatashareCliOptions {
     }
 
     static void nlpParallelism(OptionParser parser) {
+        parser.acceptsAll(
+                asList(NLP_PARALLELISM_ABBR_OPT, NLP_PARALLELISM_OPT),
+                "Number of NLP extraction threads per pipeline.")
+                .withRequiredArg()
+                .ofType( Integer.class )
+                .defaultsTo(DEFAULT_NLP_PARALLELISM);
+    }
+
+    static void nlpBatchSize(OptionParser parser) {
+        parser.acceptsAll(
+                List.of(NLP_BATCH_SIZE_OPT),
+                "Batch size of NLP extraction task in number of documents.")
+                .withRequiredArg()
+                .ofType( Integer.class )
+                .defaultsTo(DEFAULT_NLP_BATCH_SIZE);
+    }
+
+    static void nlpMaxTextLength(OptionParser parser) {
         parser.acceptsAll(
                 asList(NLP_PARALLELISM_ABBR_OPT, NLP_PARALLELISM_OPT),
                 "Number of NLP extraction threads per pipeline.")
@@ -533,6 +595,13 @@ public final class DatashareCliOptions {
                         "Explicitly specify OCR languages for tesseract. 3-character ISO 639-2 language codes and + sign for multiple languages")
                 .withRequiredArg()
                 .ofType(String.class);
+    }
+
+    static void ocrType(OptionParser parser) {
+        parser.acceptsAll(List.of(OCR_TYPE_OPT), "OCR implementation: TESSERACT or TESS4J")
+            .withRequiredArg()
+            .ofType(String.class)
+            .defaultsTo(DEFAULT_OCR_TYPE);
     }
 
     static void nlpPipeline(OptionParser parser) {
@@ -796,8 +865,39 @@ public final class DatashareCliOptions {
                 .ofType(String.class);
     }
 
+    public static void pollingInterval(OptionParser parser) {
+        parser.acceptsAll(singletonList(POLLING_INTERVAL_SECONDS_OPT), "Queue polling interval.")
+                .withRequiredArg()
+                .ofType(String.class).defaultsTo(DEFAULT_POLLING_INTERVAL_SEC);
+    }
+
+    public static void taskRepositoryType(OptionParser parser) {
+        parser.acceptsAll(
+                        singletonList(TASK_REPOSITORY_OPT), format("type of task repository (%s)", Arrays.toString(TaskRepositoryType.values())))
+                .withRequiredArg()
+                .ofType( TaskRepositoryType.class )
+                .defaultsTo(TaskRepositoryType.DATABASE);
+    }
+
+    static void taskManagerPollingInterval(OptionParser parser) {
+        parser.acceptsAll(
+                        singletonList(TASK_MANAGER_POLLING_INTERVAL_OPT), "Time to wait for task manager polling in milliseconds.")
+                .withRequiredArg()
+                .ofType(Integer.class)
+                .defaultsTo(DEFAULT_TASK_MANAGER_POLLING_INTERVAL);
+    }
+
+    static void taskWorkers(OptionParser parser) {
+        parser.acceptsAll(
+                        singletonList(TASK_WORKERS_OPT),
+                        "Number of task workers (threads).")
+                .withRequiredArg()
+                .ofType( String.class )
+                .defaultsTo(DEFAULT_TASK_WORKERS);
+    }
+
     public static ValueConverter<String> toAbsolute() {
-        return new ValueConverter<String>() {
+        return new ValueConverter<>() {
             @Override
             public String convert(String value) {
                 Path path = Paths.get(value);

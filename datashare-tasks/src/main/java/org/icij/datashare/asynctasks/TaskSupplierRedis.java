@@ -4,12 +4,16 @@ import org.apache.commons.lang3.NotImplementedException;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpQueue;
 import org.icij.datashare.asynctasks.bus.amqp.CancelledEvent;
 import org.icij.datashare.asynctasks.bus.amqp.ErrorEvent;
+import org.icij.datashare.asynctasks.bus.amqp.Event;
 import org.icij.datashare.asynctasks.bus.amqp.ProgressEvent;
 import org.icij.datashare.asynctasks.bus.amqp.ResultEvent;
 import org.icij.datashare.asynctasks.bus.amqp.TaskError;
-import org.icij.datashare.asynctasks.bus.amqp.TaskEvent;
+import org.redisson.Redisson;
+import org.redisson.RedissonBlockingQueue;
 import org.redisson.api.RTopic;
 import org.redisson.api.RedissonClient;
+import org.redisson.command.CommandSyncService;
+import org.redisson.liveobject.core.RedissonObjectBuilder;
 
 import java.io.IOException;
 import java.io.Serializable;
@@ -20,17 +24,23 @@ import java.util.function.Consumer;
 import static org.icij.datashare.asynctasks.TaskManagerRedis.EVENT_CHANNEL_NAME;
 
 public class TaskSupplierRedis implements TaskSupplier {
-    private final BlockingQueue<Task<?>> taskQueue;
     private final RTopic eventTopic;
+    private final RedissonClient redissonClient;
+    private final String taskQueueKey;
 
-    public TaskSupplierRedis(RedissonClient redissonClient, BlockingQueue<Task<?>> taskQueue) {
-        this.taskQueue = taskQueue;
+    public TaskSupplierRedis(RedissonClient redissonClient) {
+        this(redissonClient, null);
+    }
+
+    public TaskSupplierRedis(RedissonClient redissonClient, String taskQueueKey) {
         this.eventTopic = redissonClient.getTopic(EVENT_CHANNEL_NAME);
+        this.redissonClient = redissonClient;
+        this.taskQueueKey = taskQueueKey;
     }
 
     @Override
     public <V extends Serializable> Task<V> get(int timeOut, TimeUnit timeUnit) throws InterruptedException {
-        return (Task<V>) taskQueue.poll(timeOut, timeUnit);
+        return (Task<V>) taskQueue().poll(timeOut, timeUnit);
     }
 
     @Override
@@ -45,10 +55,8 @@ public class TaskSupplierRedis implements TaskSupplier {
     }
 
     @Override
-    public <V extends Serializable> void result(String taskId, V result) {
-        eventTopic.publish(result.getClass().isAssignableFrom(TaskError.class) ?
-                new ErrorEvent(taskId, (TaskError) result):
-                new ResultEvent<>(taskId, result));
+    public <V extends Serializable> void result(String taskId, TaskResult<V> result) {
+        eventTopic.publish(new ResultEvent<>(taskId, result));
     }
 
     @Override
@@ -58,16 +66,26 @@ public class TaskSupplierRedis implements TaskSupplier {
 
     @Override
     public void error(String taskId, TaskError reason) {
-        result(taskId, reason);
+        eventTopic.publish(new ErrorEvent(taskId, reason));
     }
 
     @Override
-    public void addEventListener(Consumer<TaskEvent> callback) {
-        eventTopic.addListener(TaskEvent.class, (channelString, message) -> callback.accept(message));
+    public void addEventListener(Consumer<Event> callback) {
+        eventTopic.addListener(Event.class, (channelString, message) -> callback.accept(message));
     }
 
     @Override
     public void waitForConsumer() {}
+
+    private <V extends Serializable> BlockingQueue<Task<V>> taskQueue() {
+        return this.taskQueueKey == null ?
+            new RedissonBlockingQueue<>(new TaskManagerRedis.RedisCodec<>(Task.class), getCommandSyncService(), AmqpQueue.TASK.name(), redissonClient):
+            new RedissonBlockingQueue<>(new TaskManagerRedis.RedisCodec<>(Task.class), getCommandSyncService(), String.format("%s.%s", AmqpQueue.TASK.name(), taskQueueKey), redissonClient);
+    }
+
+    private CommandSyncService getCommandSyncService() {
+        return new CommandSyncService(((Redisson) redissonClient).getConnectionManager(), new RedissonObjectBuilder(redissonClient));
+    }
 
     @Override
     public void close() throws IOException {

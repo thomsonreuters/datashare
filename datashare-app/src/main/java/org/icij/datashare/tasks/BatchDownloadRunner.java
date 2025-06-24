@@ -11,7 +11,10 @@ import org.apache.commons.lang3.StringUtils;
 import org.icij.datashare.Entity;
 import org.icij.datashare.HumanReadableSize;
 import org.icij.datashare.PropertiesProvider;
+import org.icij.datashare.asynctasks.CancelException;
+import org.icij.datashare.asynctasks.CancellableTask;
 import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.asynctasks.TaskGroup;
 import org.icij.datashare.asynctasks.bus.amqp.UriResult;
 import org.icij.datashare.batch.BatchDownload;
 import org.icij.datashare.com.mail.Mail;
@@ -38,6 +41,7 @@ import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.zip.ZipException;
@@ -47,8 +51,10 @@ import static java.lang.Integer.parseInt;
 import static java.lang.String.valueOf;
 import static java.util.stream.Collectors.toList;
 import static org.icij.datashare.cli.DatashareCliOptions.*;
+import org.icij.datashare.asynctasks.TaskGroupType;
 
-public class BatchDownloadRunner implements Callable<UriResult>, Monitorable, UserTask {
+@TaskGroup(TaskGroupType.Java)
+public class BatchDownloadRunner implements Callable<UriResult>, Monitorable, UserTask, CancellableTask {
     private final static Logger logger = LoggerFactory.getLogger(BatchDownloadRunner.class);
     static final int MAX_SCROLL_SIZE = 3500;
     static final int MAX_BATCH_RESULT_SIZE = 10000;
@@ -60,13 +66,17 @@ public class BatchDownloadRunner implements Callable<UriResult>, Monitorable, Us
     private final PropertiesProvider propertiesProvider;
     private final Function<Double, Void> progressCallback;
     private final Function<URI, MailSender> mailSenderSupplier;
+    private final CountDownLatch callWaiterLatch;
+    protected volatile boolean cancelAsked = false;
+    protected volatile boolean requeueCancel;
+    protected volatile Thread callThread;
 
     @Inject
     public BatchDownloadRunner(Indexer indexer, PropertiesProvider propertiesProvider, @Assisted Task<?> task, @Assisted Function<Double, Void> progressCallback) {
-        this(indexer, propertiesProvider, progressCallback, task, MailSender::new);
+        this(indexer, propertiesProvider, progressCallback, task, MailSender::new, new CountDownLatch(1));
     }
 
-    BatchDownloadRunner(Indexer indexer, PropertiesProvider provider, Function<Double, Void> progressCallback, Task<?> task, Function<URI, MailSender> mailSenderSupplier) {
+    BatchDownloadRunner(Indexer indexer, PropertiesProvider provider, Function<Double, Void> progressCallback, Task<?> task, Function<URI, MailSender> mailSenderSupplier, CountDownLatch latch) {
         assert task.args.get("batchDownload") != null : "'batchDownload' property in task shouldn't be null";
         this.task = (Task<File>) task;
         this.indexer = indexer;
@@ -74,6 +84,7 @@ public class BatchDownloadRunner implements Callable<UriResult>, Monitorable, Us
         this.progressCallback = progressCallback;
         this.mailSenderSupplier = mailSenderSupplier;
         this.documentVerifier = new DocumentVerifier(indexer, propertiesProvider);
+        this.callWaiterLatch = latch;
     }
 
     @Override
@@ -87,6 +98,8 @@ public class BatchDownloadRunner implements Callable<UriResult>, Monitorable, Us
         int scrollSize = min(scrollSizeFromParams, MAX_SCROLL_SIZE);
         long maxZipSizeBytes = HumanReadableSize.parse(propertiesProvider.get(BATCH_DOWNLOAD_MAX_SIZE_OPT).orElse(DEFAULT_BATCH_DOWNLOAD_MAX_SIZE));
         long zippedFilesSize = 0;
+        callThread = Thread.currentThread();
+        callWaiterLatch.countDown(); // for tests
         BatchDownload batchDownload = getBatchDownload();
 
         logger.info("running batch download for user {} on project {} with {} scroll with throttle {}ms and scroll size of {}",
@@ -112,6 +125,10 @@ public class BatchDownloadRunner implements Callable<UriResult>, Monitorable, Us
                 taskProperties.put("batchDownload", batchDownload);
                 while (!docsToProcess.isEmpty()) {
                     for (int i = 0; i < docsToProcess.size() && numberOfResults.get() < maxResultSize && zippedFilesSize <= maxZipSizeBytes; i++) {
+                        if (cancelAsked) {
+                            logger.info("cancelling batch download {} requeue={}", batchDownload.uuid, requeueCancel);
+                            throw new CancelException(requeueCancel);
+                        }
                         Document document = (Document) docsToProcess.get(i);
                         int addedBytes = documentVerifier.isRootDocumentSizeAllowed(document) ? zipper.add(document) : 0;
                         if (addedBytes > 0) {
@@ -159,6 +176,18 @@ public class BatchDownloadRunner implements Callable<UriResult>, Monitorable, Us
     private BatchDownload getBatchDownload() {
         return (BatchDownload) task.args.get("batchDownload");
     }
+
+    @Override
+    public void cancel(boolean requeue) {
+        requeueCancel = requeue;
+        cancelAsked = true;
+        try {
+            if (callThread != null) callThread.join();
+        } catch (InterruptedException e) {
+            logger.warn("batch download interrupted during cancel check status for {}", task.id);
+        }
+    }
+
     private static class Zipper implements AutoCloseable {
 
         protected final BatchDownload batchDownload;

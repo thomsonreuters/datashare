@@ -1,11 +1,17 @@
 package org.icij.datashare.asynctasks;
 
-import org.fest.assertions.Assertions;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import org.icij.datashare.PropertiesProvider;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpInterlocutor;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpQueue;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpServerRule;
 import org.icij.datashare.asynctasks.bus.amqp.TaskError;
+import org.icij.datashare.asynctasks.bus.amqp.UriResult;
+import org.icij.datashare.tasks.RoutingStrategy;
+import org.icij.datashare.time.DatashareTime;
 import org.icij.datashare.user.User;
 import org.icij.extract.redis.RedissonClientFactory;
 import org.icij.task.Options;
@@ -15,22 +21,16 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Test;
-import org.redisson.Redisson;
-import org.redisson.RedissonMap;
 import org.redisson.api.RedissonClient;
-import org.redisson.command.CommandSyncService;
-import org.redisson.liveobject.core.RedissonObjectBuilder;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 
 import static org.fest.assertions.Assertions.assertThat;
+import static org.junit.Assert.assertThrows;
 
 public class TaskManagerAmqpTest {
     private static AmqpInterlocutor AMQP;
@@ -46,8 +46,37 @@ public class TaskManagerAmqpTest {
 
         assertThat(taskManager.getTask(expectedTaskViewId)).isNotNull();
         Task<Serializable> actualTaskView = taskQueue.poll(1, TimeUnit.SECONDS);
-        Assertions.assertThat(actualTaskView).isNotNull();
-        Assertions.assertThat(actualTaskView.id).isEqualTo(expectedTaskViewId);
+        assertThat(actualTaskView).isNotNull();
+        assertThat(actualTaskView.id).isEqualTo(expectedTaskViewId);
+    }
+
+    @Test(timeout = 2000)
+    public void test_new_task_with_group_routing() throws Exception {
+        TaskGroupType key = TaskGroupType.Test;
+        try (TaskManagerAmqp groupTaskManager = new TaskManagerAmqp(AMQP, new TaskRepositoryMemory(), RoutingStrategy.GROUP, () -> nextMessage.countDown());
+             TaskSupplierAmqp groupTaskSupplier = new TaskSupplierAmqp(AMQP, key.name())) {
+            groupTaskSupplier.consumeTasks(t -> taskQueue.add(t));
+            String expectedTaskViewId = groupTaskManager.startTask("taskName", User.local(), new Group(key), Map.of());
+
+            assertThat(groupTaskManager.getTask(expectedTaskViewId)).isNotNull();
+            Task<Serializable> actualTaskView = taskQueue.poll(1, TimeUnit.SECONDS);
+            assertThat(actualTaskView).isNotNull();
+            assertThat(groupTaskManager.getTaskGroup(expectedTaskViewId)).isEqualTo(new Group(key));
+        }
+    }
+
+    @Test(timeout = 2000)
+    public void test_new_task_with_name_routing() throws Exception {
+        try (TaskManagerAmqp groupTaskManager = new TaskManagerAmqp(AMQP, new TaskRepositoryMemory(), RoutingStrategy.NAME, () -> nextMessage.countDown());
+             TaskSupplierAmqp groupTaskSupplier = new TaskSupplierAmqp(AMQP, "TaskName")) {
+            groupTaskSupplier.consumeTasks(t -> taskQueue.add(t));
+            String expectedTaskViewId = groupTaskManager.startTask("TaskName", User.local(), Map.of());
+
+            assertThat(groupTaskManager.getTask(expectedTaskViewId)).isNotNull();
+            Task<Serializable> actualTaskView = taskQueue.poll(1, TimeUnit.SECONDS);
+            assertThat(actualTaskView).isNotNull();
+            assertThat(actualTaskView.name).isEqualTo("TaskName");
+        }
     }
 
     @Test(timeout = 2000)
@@ -60,8 +89,8 @@ public class TaskManagerAmqpTest {
             Task<Serializable> actualTask1 = taskQueue.poll(1, TimeUnit.SECONDS);
             Task<Serializable> actualTask2 = taskQueue.poll(1, TimeUnit.SECONDS);
 
-            Assertions.assertThat(actualTask1).isNotNull();
-            Assertions.assertThat(actualTask2).isNotNull();
+            assertThat(actualTask1).isNotNull();
+            assertThat(actualTask2).isNotNull();
         }
     }
 
@@ -83,11 +112,27 @@ public class TaskManagerAmqpTest {
 
         // in the task runner loop
         Task<Serializable> task = taskQueue.poll(2, TimeUnit.SECONDS); // to sync
-        taskSupplier.result(task.id,"result");
+        TaskResult<String> result = new TaskResult<>("result");
+        taskSupplier.result(task.id, result);
 
         nextMessage.await();
         assertThat(taskManager.getTask(task.id).getState()).isEqualTo(Task.State.DONE);
-        assertThat(taskManager.getTask(task.id).getResult()).isEqualTo("result");
+        assertThat(taskManager.getTask(task.id).getResult()).isEqualTo(result);
+    }
+
+    @Test(timeout = 200000)
+    public void test_task_result_uri_result_type() throws Exception {
+        taskManager.startTask("taskName", User.local(), new HashMap<>());
+
+        // in the task runner loop
+        Task<Serializable> task = taskQueue.poll(2, TimeUnit.SECONDS); // to sync
+        TaskResult<UriResult> taskResult = new TaskResult<>(new UriResult(new URI("file:///my/file"),42));
+        taskSupplier.result(task.id,taskResult);
+
+        nextMessage.await();
+        Task<Serializable> task1 = taskManager.getTask(task.id);
+        TaskResult<Serializable> result = task1.getResult();
+        assertThat(result).isEqualTo(taskResult);
     }
 
     @Test(timeout = 2000)
@@ -104,6 +149,36 @@ public class TaskManagerAmqpTest {
         assertThat(taskManager.getTask(task.id).error.getMessage()).isEqualTo("error in runner");
     }
 
+    @Test
+    public void test_clear_task_among_two_tasks() throws Exception {
+        String taskView1Id = taskManager.startTask("taskName1", User.local(), new HashMap<>());
+        taskManager.startTask("taskName2", User.local(), new HashMap<>());
+
+        assertThat(taskManager.getTasks().toList()).hasSize(2);
+
+        Task<?> clearedTask = taskManager.clearTask(taskView1Id);
+
+        assertThat(taskView1Id).isEqualTo(clearedTask.id);
+        assertThrows(UnknownTask.class, () -> taskManager.getTask(taskView1Id));
+        assertThat(taskManager.getTasks().toList()).hasSize(1);
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void test_clear_running_task_should_throw_exception() throws Exception {
+        taskManager.startTask("taskName", User.local(), new HashMap<>());
+
+        assertThat(taskManager.getTasks().toList()).hasSize(1);
+
+        // in the task runner loop
+        Task<Serializable> task = taskQueue.poll(1, TimeUnit.SECONDS); // to sync
+        taskSupplier.progress(task.id,0.5);
+        nextMessage.await();
+
+        assertThat(taskManager.getTask(task.id).getState()).isEqualTo(Task.State.RUNNING);
+
+        taskManager.clearTask(task.id);
+    }
+
     @Test(timeout = 2000)
     public void test_task_canceled() throws Exception {
         taskManager.startTask("taskName", User.local(), new HashMap<>());
@@ -117,29 +192,63 @@ public class TaskManagerAmqpTest {
         assertThat(taskManager.getTask(task.id).getState()).isEqualTo(Task.State.CANCELLED);
     }
 
+    @Test
+    public void test_insert_task() throws IOException {
+        Task<String> task = new Task<>("name", User.local(), new HashMap<>());
+
+        taskManager.insert(task, null);
+
+        assertThat(taskManager.getTasks().toList()).hasSize(1);
+        assertThat(taskManager.getTask(task.id)).isNotNull();
+    }
+
+    @Test
+    public void test_update_task() throws IOException {
+        // Given
+        Task<?> task = new Task<>("HelloWorld", User.local(), Map.of("greeted", "world"));
+        Task<?> update = new Task<>(task.id, task.name, task.getState(), 0.5, DatashareTime.getNow(),  3,  null, task.args, null, null);
+        // When
+        taskManager.insert(task, null);
+        taskManager.update(update);
+        Task<?> updated = taskManager.getTask(task.id);
+        // Then
+        assertThat(updated).isEqualTo(update);
+    }
+
+    @Test
+    public void test_health_ok() {
+        assertThat(taskManager.getHealth()).isTrue();
+    }
+
+    @Test
+    public void test_health_ko() throws Exception {
+        AmqpQueue[] queues = {AmqpQueue.TASK, AmqpQueue.MANAGER_EVENT, AmqpQueue.MONITORING};
+        AmqpInterlocutor amqpKo = new AmqpInterlocutor(new PropertiesProvider(new HashMap<>() {{
+            put("messageBusAddress", "amqp://admin:admin@localhost?rabbitMq=false&monitoring=true");
+        }}), queues);
+        RedissonClient redissonClientKo = new RedissonClientFactory().withOptions(
+                Options.from(new PropertiesProvider(Map.of("redisAddress", "redis://redis:6379")).getProperties())).create();
+        TaskManagerAmqp taskManagerAmqpKo = new TaskManagerAmqp(amqpKo, new TaskRepositoryRedis(redissonClientKo, "tasks:queue:test"), RoutingStrategy.UNIQUE, () -> nextMessage.countDown());
+
+        amqpKo.close();
+
+        assertThat(taskManagerAmqpKo.getHealth()).isFalse();
+    }
+
     @BeforeClass
     public static void beforeClass() throws Exception {
+        AmqpQueue[] queues = {AmqpQueue.TASK, AmqpQueue.MANAGER_EVENT, AmqpQueue.MONITORING};
         AMQP = new AmqpInterlocutor(new PropertiesProvider(new HashMap<>() {{
-            put("messageBusAddress", "amqp://admin:admin@localhost?rabbitMq=false");
-        }}));
-        AMQP.createAmqpChannelForPublish(AmqpQueue.TASK);
-        AMQP.createAmqpChannelForPublish(AmqpQueue.MANAGER_EVENT);
+            put("messageBusAddress", "amqp://admin:admin@localhost?rabbitMq=false&monitoring=true");
+        }}), queues);
     }
 
     @Before
     public void setUp() throws IOException {
         nextMessage = new CountDownLatch(1);
         final RedissonClient redissonClient = new RedissonClientFactory().withOptions(
-            Options.from(new PropertiesProvider(Map.of("redisAddress", "redis://redis:6379")).getProperties())).create();
-        Map<String, Task<?>> tasks = new RedissonMap<>(new TaskManagerRedis.TaskViewCodec(),
-            new CommandSyncService(((Redisson) redissonClient).getConnectionManager(),
-                new RedissonObjectBuilder(redissonClient)),
-            "tasks:queue:test",
-            redissonClient,
-            null,
-            null
-        );
-        taskManager = new TaskManagerAmqp(AMQP, tasks, () -> nextMessage.countDown());
+                Options.from(new PropertiesProvider(Map.of("redisAddress", "redis://redis:6379")).getProperties())).create();
+        taskManager = new TaskManagerAmqp(AMQP, new TaskRepositoryRedis(redissonClient, "tasks:queue:test"), RoutingStrategy.UNIQUE, () -> nextMessage.countDown());
         taskSupplier = new TaskSupplierAmqp(AMQP);
         taskSupplier.consumeTasks(t -> taskQueue.add(t));
     }
@@ -148,7 +257,7 @@ public class TaskManagerAmqpTest {
     public void tearDown() throws Exception {
         taskQueue.clear();
         taskManager.clear();
-        taskManager.stopAllTasks(User.local());
+        taskManager.stopTasks(User.local());
         taskSupplier.close();
         taskManager.close();
     }

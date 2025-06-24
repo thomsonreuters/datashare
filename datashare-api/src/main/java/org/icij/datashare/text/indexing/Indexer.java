@@ -25,7 +25,7 @@ public interface Indexer extends Closeable {
     boolean deleteAll(String indexName) throws IOException;
 
     boolean getHealth();
-
+    boolean ping() throws IOException;
     void close() throws IOException;
 
     boolean bulkAdd(String indexName, Pipeline.Type nerType, List<NamedEntity> namedEntities, Document parent) throws IOException;
@@ -33,7 +33,9 @@ public interface Indexer extends Closeable {
     <T extends Entity> boolean bulkUpdate(String indexName, List<T> entities) throws IOException;
     <T extends Entity> void add(String indexName, T obj) throws IOException;
     <T extends Entity> void update(String indexName, T obj) throws IOException;
-    <T extends Entity> boolean exists(String indexName, String id) throws IOException;
+
+    boolean exists(String indexName) throws IOException;
+    boolean exists(String indexName, String id) throws IOException;
 
     <T extends Entity> T get(String indexName, String id);
     <T extends Entity> T get(String indexName, String id, List<String> sourceExcludes);
@@ -61,9 +63,11 @@ public interface Indexer extends Closeable {
         Searcher withoutSource(String... fields);
         Searcher withSource(boolean source);
         Searcher limit(int maxCount);
+        Searcher sort(String field, SortOrder order);
         void clearScroll() throws IOException;
         long totalHits();
         Searcher with(int fuzziness, boolean phraseMatches);
+        enum SortOrder { ASC, DESC }
     }
 
     interface QueryBuilderSearcher extends Searcher {

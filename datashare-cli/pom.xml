@@ -7,12 +7,13 @@
     <parent>
         <groupId>org.icij.datashare</groupId>
         <artifactId>datashare</artifactId>
-        <version>18.2.1</version>
+        <version>20.0.10</version>
     </parent>
 
     <artifactId>datashare-cli</artifactId>
+    <name>datashare-cli</name>
     <packaging>jar</packaging>
-    <version>13.5.0</version>
+    <version>13.6.1</version>
 
     <dependencies>
         <dependency>
@@ -31,7 +32,6 @@
         <dependency>
             <groupId>org.icij.datashare</groupId>
             <artifactId>datashare-api</artifactId>
-            <version>13.8.0</version>
             <scope>provided</scope>
         </dependency>
 
@@ -81,8 +81,8 @@
                 </configuration>
             </plugin>
             <plugin>
-                <groupId>org.sonatype.plugins</groupId>
-                <artifactId>nexus-staging-maven-plugin</artifactId>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

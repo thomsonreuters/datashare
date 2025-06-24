@@ -1,7 +1,6 @@
 package org.icij.datashare.db;
 
 import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 import liquibase.Scope;
 import liquibase.command.CommandScope;
 import liquibase.command.core.UpdateCommandStep;
@@ -13,6 +12,8 @@ import liquibase.ui.LoggerUIService;
 import org.icij.datashare.PropertiesProvider;
 import org.icij.datashare.Repository;
 import org.icij.datashare.RepositoryFactory;
+import org.icij.datashare.batch.BatchSearchRepository;
+import org.icij.datashare.user.ApiKeyRepository;
 import org.jooq.SQLDialect;
 
 import javax.sql.DataSource;
@@ -37,14 +38,17 @@ public class RepositoryFactoryImpl implements RepositoryFactory {
         this.dataSource = createDatasource();
     }
 
+    @Override
     public Repository createRepository() {
         return createRepository(JooqRepository::new);
     }
-    public JooqApiKeyRepository createApiKeyRepository() {
+    @Override
+    public ApiKeyRepository createApiKeyRepository() {
         return createRepository(JooqApiKeyRepository::new);
     }
 
-    public JooqBatchSearchRepository createBatchSearchRepository() {
+    @Override
+    public BatchSearchRepository createBatchSearchRepository() {
         return createRepository(JooqBatchSearchRepository::new);
     }
 
@@ -73,7 +77,7 @@ public class RepositoryFactoryImpl implements RepositoryFactory {
         return constructor.apply(dataSource, guessSqlDialectFrom(getDataSourceUrl()));
     }
 
-    static SQLDialect guessSqlDialectFrom(String dataSourceUrl) {
+    public static SQLDialect guessSqlDialectFrom(String dataSourceUrl) {
         for (SQLDialect dialect: SQLDialect.values()) {
             if (dataSourceUrl.contains(dialect.name().toLowerCase())) {
                 return dialect;
@@ -82,6 +86,9 @@ public class RepositoryFactoryImpl implements RepositoryFactory {
         throw new IllegalArgumentException("unknown SQL dialect for datasource : " + dataSourceUrl);
     }
 
+    public DataSource getDataSource() {return dataSource;}
+    public SQLDialect guessSqlDialect() {return guessSqlDialectFrom(getDataSourceUrl());}
+
     DataSource createDatasource() {
         HikariConfig config = new HikariConfig();
         String dataSourceUrl = getDataSourceUrl();
@@ -89,7 +96,7 @@ public class RepositoryFactoryImpl implements RepositoryFactory {
         if (dataSourceUrl.contains("sqlite")) {
             config.setDriverClassName("org.sqlite.JDBC");
         }
-        return new HikariDataSource(config);
+        return new ExtendedHikariDatasource(config);
     }
 
     private String getDataSourceUrl() {

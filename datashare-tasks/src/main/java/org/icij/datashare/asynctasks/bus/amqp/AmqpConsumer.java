@@ -1,5 +1,6 @@
 package org.icij.datashare.asynctasks.bus.amqp;
 
+import com.rabbitmq.client.AlreadyClosedException;
 import org.icij.datashare.json.JsonObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,7 +19,7 @@ import static java.util.Optional.ofNullable;
  * @param <EvtConsumer> The class for handling the received event class
  */
 public class AmqpConsumer<Evt extends Event, EvtConsumer extends Consumer<Evt>> implements Deserializer<Evt> {
-    private static final int WAIT_CLOSED_CHANNEL_DELAY_MS = 2000;
+    private static final int WAIT_CLOSED_CHANNEL_DELAY_MS = 1000;
     private final Logger logger = LoggerFactory.getLogger(this.getClass());
     protected final AmqpInterlocutor amqpInterlocutor;
     public final EvtConsumer eventConsumer;
@@ -28,17 +29,24 @@ public class AmqpConsumer<Evt extends Event, EvtConsumer extends Consumer<Evt>> 
 
     public AmqpConsumer(AmqpInterlocutor amqpInterlocutor,
                         EvtConsumer eventConsumer, AmqpQueue queue, Class<Evt> evtClass) throws IOException {
-        this.amqpInterlocutor = amqpInterlocutor;
-        this.eventConsumer = eventConsumer;
-        this.channel = amqpInterlocutor.createAmqpChannelForConsume(queue);
-        this.evtClass = evtClass;
+        this(amqpInterlocutor, eventConsumer, queue, evtClass, null, null);
+    }
+
+    public AmqpConsumer(AmqpInterlocutor amqpInterlocutor,
+                        EvtConsumer eventConsumer, AmqpQueue queue, Class<Evt> evtClass, CountDownLatch initLatch) throws IOException {
+        this(amqpInterlocutor, eventConsumer, queue, evtClass, null, initLatch);
+    }
+
+    public AmqpConsumer(AmqpInterlocutor amqpInterlocutor,
+                        EvtConsumer eventConsumer, AmqpQueue queue, Class<Evt> evtClass, String key) throws IOException {
+        this(amqpInterlocutor, eventConsumer, queue, evtClass, key, null);
     }
 
     AmqpConsumer(AmqpInterlocutor amqpInterlocutor,
-                 EvtConsumer eventConsumer, AmqpQueue queue, Class<Evt> evtClass, CountDownLatch initLatch) throws IOException {
+                 EvtConsumer eventConsumer, AmqpQueue queue, Class<Evt> evtClass, String key, CountDownLatch initLatch) throws IOException {
         this.amqpInterlocutor = amqpInterlocutor;
         this.eventConsumer = eventConsumer;
-        this.channel = amqpInterlocutor.createAmqpChannelForConsume(queue);
+        this.channel = amqpInterlocutor.createAmqpChannelForConsume(queue, key);
         this.evtClass = evtClass;
         ofNullable(initLatch).ifPresent(CountDownLatch::countDown);
     }
@@ -92,7 +100,11 @@ public class AmqpConsumer<Evt extends Event, EvtConsumer extends Consumer<Evt>> 
     }
 
     public void cancel() throws IOException {
-        channel.cancel(consumerTag.getAndSet(null));
+        synchronized (channel) {
+            if (consumerTag.get() != null) {
+                channel.cancel(consumerTag.getAndSet(null));
+            }
+        }
     }
 
     public boolean isCanceled() {
@@ -107,10 +119,14 @@ public class AmqpConsumer<Evt extends Event, EvtConsumer extends Consumer<Evt>> 
 
     public void shutdown() throws IOException {
         logger.info("shutting down consumer channel");
-        if (!isCanceled()) {
-            cancel();
+        try {
+            if (!isCanceled()) {
+                cancel();
+            }
+            channel.close();
+        } catch (IOException | AlreadyClosedException ioe) {
+            logger.error("exception during close", ioe);
         }
-        channel.close();
     }
 
     public Evt deserialize(byte[] rawJson) {

@@ -1,10 +1,13 @@
 package org.icij.datashare.tasks;
 
+
 import com.google.inject.Inject;
 import com.google.inject.assistedinject.Assisted;
 import org.icij.datashare.PropertiesProvider;
 import org.icij.datashare.Stage;
 import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.asynctasks.TaskGroup;
+import org.icij.datashare.asynctasks.TaskGroupType;
 import org.icij.datashare.extract.DocumentCollectionFactory;
 import org.icij.extract.queue.DocumentQueue;
 import org.slf4j.Logger;
@@ -17,6 +20,7 @@ import java.util.function.Predicate;
 /**
  * filters the document queue with extracted docs
  */
+@TaskGroup(TaskGroupType.Java)
 public class DeduplicateTask extends PipelineTask<Path> {
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final DocumentCollectionFactory<Path> factory;

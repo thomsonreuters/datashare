@@ -3,7 +3,9 @@ package org.icij.datashare.text;
 import org.icij.datashare.json.JsonObjectMapper;
 import org.junit.Test;
 
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -16,9 +18,6 @@ import static org.icij.datashare.text.DocumentBuilder.createDoc;
 import static org.icij.datashare.text.Project.project;
 import static org.icij.datashare.text.nlp.DocumentMetadataConstants.DEFAULT_VALUE_UNKNOWN;
 import static org.icij.datashare.text.nlp.Pipeline.Type.CORENLP;
-import static org.icij.datashare.text.nlp.Pipeline.Type.GATENLP;
-import static org.icij.datashare.text.nlp.Pipeline.Type.IXAPIPE;
-import static org.icij.datashare.text.nlp.Pipeline.Type.MITIE;
 import static org.icij.datashare.text.nlp.Pipeline.Type.OPENNLP;
 import static org.icij.datashare.text.nlp.Pipeline.set;
 
@@ -26,7 +25,6 @@ public class DocumentTest {
     @Test
     public void test_json_deserialize() throws Exception {
         assertThat(JsonObjectMapper.MAPPER.writeValueAsString(createDoc("content").build())).contains("\"projectId\":\"prj\"");
-        System.out.println(JsonObjectMapper.MAPPER.writeValueAsString(createDoc("content").build()));
         assertThat(JsonObjectMapper.MAPPER.readValue(("{\"id\":\"45a0a224c2836b4c558f3b56e2a1c69c21fcc8b3f9f4f99f2bc49946acfb28d8\"," +
                         "\"path\":\"file:///home/dev/src/datashare/datashare-api/path\"," +
                         "\"dirname\":\"/home/dev/src/datashare/datashare:api/\"," +
@@ -67,7 +65,6 @@ public class DocumentTest {
     public void test_ner_mask() {
         assertThat(nerMask(new HashSet<>())).isEqualTo((short) 0);
         assertThat(nerMask(set(CORENLP))).isEqualTo((short) 1);
-        assertThat(nerMask(set(CORENLP, GATENLP))).isEqualTo((short) 3);
         assertThat(nerMask(set(OPENNLP, CORENLP))).isEqualTo((short) 17);
     }
 
@@ -75,8 +72,8 @@ public class DocumentTest {
     public void test_from_mask() {
         assertThat(Document.fromNerMask(0)).isEmpty();
         assertThat(Document.fromNerMask(1)).contains(CORENLP);
-        assertThat(Document.fromNerMask(5)).contains(CORENLP, IXAPIPE);
-        assertThat(Document.fromNerMask(31)).contains(CORENLP, GATENLP, IXAPIPE, MITIE, OPENNLP);
+        assertThat(Document.fromNerMask(5)).contains(CORENLP);
+        assertThat(Document.fromNerMask(31)).contains(CORENLP, OPENNLP);
     }
 
     @Test
@@ -86,19 +83,19 @@ public class DocumentTest {
 
     @Test
     public void test_creation_date_without_zone() {
-        assertThat(createDoc("name").with(new HashMap<String, Object>() {{
+        assertThat(createDoc("name").with(new HashMap<>() {{
             put("tika_metadata_dcterms_created", "2019-02-04T11:37:30.368441317");}}).build().getCreationDate()).isNotNull();
     }
 
     @Test
     public void test_creation_date_zoned() {
-        assertThat(createDoc("name").with(new HashMap<String, Object>() {{
+        assertThat(createDoc("name").with(new HashMap<>() {{
             put("tika_metadata_dcterms_created", "2019-02-04T11:37:30Z");}}).build().getCreationDate()).isNotNull();
     }
 
     @Test
     public void test_creation_date_unparseable() {
-        assertThat(createDoc("name").with(new HashMap<String, Object>() {{
+        assertThat(createDoc("name").with(new HashMap<>() {{
             put("tika_metadata_dcterms_created", "not a date");}}).build().getCreationDate()).isNull();
     }
 
@@ -155,6 +152,27 @@ public class DocumentTest {
         Document doc = createDoc("name").with(content_translated).build();
         assertThat(doc.getContentTranslated()).isNotNull();
         assertThat(JsonObjectMapper.MAPPER.writeValueAsString(doc)).contains("\"content_translated\":[{\"target_language\":\"ENGLISH\",\"content\":\"hello world\"}]");
+    }
+
+    @Test
+    public void test_get_extractor_version() {
+        Document email = createDoc("name").ofContentType("message/rfc822").with(new HashMap<>() {{
+            put("tika_metadata_tika_version", "Apache Tika 3.1.0");
+        }}).build();
+        assertThat(email.getExtractorVersion()).isEqualTo("Apache Tika 3.1.0");
+    }
+
+    @Test
+    public void test_get_extractor_version_from_history_records() {
+        Document email = createDoc("name").ofContentType("message/rfc822").extractedAt(Date.from(Instant.parse("2019-05-09T16:12:17.589Z"))).build();
+        assertThat(email.getExtractorVersion()).isEqualTo("Apache Tika 1.18.0");
+    }
+
+    @Test
+    public void test_get_tika_version_record() {
+        assertThat(Document.getTikaVersion(new Date(0))).isEqualTo("Apache Tika 1.8.0");
+        assertThat(Document.getTikaVersion(Date.from(Instant.parse("2016-05-24T15:29:30Z")))).isEqualTo("Apache Tika 1.12.0");
+        assertThat(Document.getTikaVersion(Date.from(Instant.parse("2016-05-24T15:29:32Z")))).isEqualTo("Apache Tika 1.13.0");
     }
 
     @Test

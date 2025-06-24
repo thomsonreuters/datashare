@@ -7,6 +7,7 @@ import org.icij.datashare.Entity;
 import org.icij.datashare.PropertiesProvider;
 import org.icij.datashare.Stage;
 import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.asynctasks.TaskGroup;
 import org.icij.datashare.extract.DocumentCollectionFactory;
 import org.icij.datashare.text.Document;
 import org.icij.datashare.text.indexing.Indexer;
@@ -38,8 +39,10 @@ import static org.icij.datashare.cli.DatashareCliOptions.REPORT_NAME_OPT;
 import static org.icij.datashare.cli.DatashareCliOptions.SCROLL_DURATION_OPT;
 import static org.icij.datashare.cli.DatashareCliOptions.SCROLL_SIZE_OPT;
 import static org.icij.datashare.cli.DatashareCliOptions.SCROLL_SLICES_OPT;
+import org.icij.datashare.asynctasks.TaskGroupType;
 import static org.icij.datashare.text.indexing.ScrollQueryBuilder.createScrollQuery;
 
+@TaskGroup(TaskGroupType.Java)
 public class ScanIndexTask extends PipelineTask<Path> {
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final Indexer indexer;
@@ -51,7 +54,7 @@ public class ScanIndexTask extends PipelineTask<Path> {
 
     @Inject
     public ScanIndexTask(DocumentCollectionFactory<Path> factory, final Indexer indexer,
-                         @Assisted Task<Long> taskView, @Assisted Function<Double, Void> updateCallback) {
+                         @Assisted Task<Long> taskView, @Assisted Function<Double, Void> ignored) {
         super(Stage.SCANIDX, taskView.getUser(), factory, new PropertiesProvider(taskView.args), Path.class);
         this.scrollDuration = propertiesProvider.get(SCROLL_DURATION_OPT).orElse(DEFAULT_SCROLL_DURATION);
         this.scrollSize = parseInt(propertiesProvider.get(SCROLL_SIZE_OPT).orElse(valueOf(DEFAULT_SCROLL_SIZE)));

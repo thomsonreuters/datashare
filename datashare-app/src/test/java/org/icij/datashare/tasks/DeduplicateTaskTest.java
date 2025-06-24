@@ -17,7 +17,7 @@ import static org.icij.datashare.tasks.PipelineTask.PATH_POISON;
 public class DeduplicateTaskTest {
     DocumentCollectionFactory<Path> docCollectionFactory = new MemoryDocumentCollectionFactory<>();
     Map<String, Object> defaultOpts = Map.of("queueName", "test:queue", "stages", "DEDUPLICATE");
-    DeduplicateTask task = new DeduplicateTask(docCollectionFactory, new Task<>(DeduplicateTask.class.getName(), User.local(),  defaultOpts), null);
+    DeduplicateTask task = new DeduplicateTask(docCollectionFactory, new Task<>(DeduplicateTask.class.getName(), User.local(), defaultOpts), null);
 
     @Test(timeout = 2000)
     public void test_filter_empty() throws Exception {

@@ -1,154 +1,184 @@
 package org.icij.datashare.asynctasks;
 
+import java.util.HashSet;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Stream;
 import org.apache.commons.lang3.NotImplementedException;
+import org.icij.datashare.PropertiesProvider;
+import org.icij.datashare.asynctasks.bus.amqp.Event;
 import org.icij.datashare.asynctasks.bus.amqp.TaskError;
-import org.icij.datashare.asynctasks.bus.amqp.TaskEvent;
-import org.icij.datashare.user.User;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
-import static java.util.concurrent.Executors.newSingleThreadExecutor;
-import static java.util.stream.Collectors.toList;
-import static org.icij.datashare.asynctasks.Task.State.RUNNING;
+import static java.lang.Integer.parseInt;
+import static org.icij.datashare.asynctasks.Task.State.FINAL_STATES;
 
 
 public class TaskManagerMemory implements TaskManager, TaskSupplier {
+    protected static final int DEFAULT_TASK_POLLING_INTERVAL_MS = 5000;
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final ExecutorService executor = newSingleThreadExecutor();
-    private final ConcurrentMap<String, Task<?>> tasks = new ConcurrentHashMap<>();
+    private final ExecutorService executor;
+    private final TaskRepository tasks;
     private final BlockingQueue<Task<?>> taskQueue;
-    private final TaskWorkerLoop loop;
+    private final List<TaskWorkerLoop> loops;
     private final AtomicInteger executedTasks = new AtomicInteger(0);
+    private final int pollingInterval;
+    private final int taskPollingIntervalMs;
 
-    public TaskManagerMemory(BlockingQueue<Task<?>> taskQueue, TaskFactory taskFactory) {
-        this(taskQueue, taskFactory, new CountDownLatch(1));
+    public TaskManagerMemory(TaskFactory taskFactory) {
+        this(taskFactory, new TaskRepositoryMemory(), new PropertiesProvider(), new CountDownLatch(1));
     }
 
-    public TaskManagerMemory(BlockingQueue<Task<?>> taskQueue, TaskFactory taskFactory, CountDownLatch latch) {
-        this.taskQueue = taskQueue;
-        loop = new TaskWorkerLoop(taskFactory, this, latch);
-        executor.submit(loop);
+    public TaskManagerMemory(TaskFactory taskFactory, TaskRepository tasks, PropertiesProvider propertiesProvider, CountDownLatch latch) {
+        this.taskQueue = new LinkedBlockingQueue<>();
+        int parallelism = parseInt(propertiesProvider.get("taskWorkers").orElse("1"));
+        pollingInterval = Integer.parseInt(propertiesProvider.get("pollingInterval").orElse("60"));
+        taskPollingIntervalMs = Integer.parseInt(propertiesProvider.get("taskManagerPollingIntervalMilliseconds").orElse(String.valueOf(DEFAULT_TASK_POLLING_INTERVAL_MS)));
+        logger.info("running TaskManager {} with {} workers", this, parallelism);
+        executor = Executors.newFixedThreadPool(parallelism);
+        loops = IntStream.range(0, parallelism).mapToObj(i -> new TaskWorkerLoop(taskFactory, this, latch, pollingInterval)).collect(Collectors.toList());
+        loops.forEach(executor::submit);
+        this.tasks = tasks;
     }
 
-    public <V> Task<V> getTask(final String taskId) {
-        return (Task<V>) tasks.get(taskId);
+    public <V extends Serializable> Task<V> getTask(final String taskId) throws UnknownTask, IOException {
+        return tasks.getTask(taskId);
     }
 
     @Override
-    public List<Task<?>> getTasks() {
-        return new LinkedList<>(tasks.values());
-    }
-
-    @Override
-    public List<Task<?>> getTasks(User user, Pattern pattern) {
-        return TaskManager.getTasks(tasks.values().stream(), user, pattern);
+    public Stream<Task<?>> getTasks(TaskFilters filters) throws IOException {
+        return tasks.getTasks(filters);
     }
 
     @Override
     public Void progress(String taskId, double rate) {
-        Task<?> taskView = tasks.get(taskId);
-        if (taskView != null) {
-            taskView.setProgress(rate);
-        } else {
+        try {
+            Task<Serializable> task = getTask(taskId);
+            task.setProgress(rate);
+            update(task);
+        } catch (UnknownTask ex) {
             logger.warn("unknown task id <{}> for progress={} call", taskId, rate);
+        } catch (IOException e) {
+            logger.error("error while updating progress for task <{}>", taskId, e);
         }
         return null;
     }
 
     @Override
-    public <V extends Serializable> void result(String taskId, V result) {
-        Task<V> taskView = (Task<V>) tasks.get(taskId);
-        if (taskView != null) {
-            taskView.setResult(result);
+    public <V extends Serializable> void result(String taskId, TaskResult<V> result) {
+        try {
+            Task<V> task = getTask(taskId);
+            task.setResult(result);
+            update(task);
             executedTasks.incrementAndGet();
-        } else {
+        } catch (UnknownTask ex) {
             logger.warn("unknown task id <{}> for result={} call", taskId, result);
+        } catch (IOException e) {
+            logger.error("error while updating result for task <{}>", taskId, e);
         }
     }
 
     @Override
     public void canceled(Task<?> task, boolean requeue) {
-        Task<?> taskView = tasks.get(task.id);
-        if (taskView != null) {
-            taskView.cancel();
-            if (requeue) {
-                taskQueue.offer(task);
-            }
+        Task<?> taskView;
+        try {
+             taskView = getTask(task.id);
+             taskView.cancel();
+             update(taskView);
+        } catch (UnknownTask ex) {
+            logger.warn("unknown task id <{}> for cancel={} call", task.id, requeue);
+        } catch (IOException e) {
+            logger.error("error while canceling task <{}>", task.getId(), e);
+        }
+        if (requeue) {
+            taskQueue.offer(task);
         }
     }
 
     @Override
     public void error(String taskId, TaskError reason) {
-        Task<?> taskView = tasks.get(taskId);
-        if (taskView != null) {
-            taskView.setError(reason);
+        try {
+            Task<Serializable> task = getTask(taskId);
+            task.setError(reason);
+            update(task);
             executedTasks.incrementAndGet();
-        } else {
+        } catch (UnknownTask ex) {
             logger.warn("unknown task id <{}> for error={} call", taskId, reason.toString());
+        } catch (IOException e) {
+            logger.error("error while updating error for task <{}>", taskId, e);
         }
     }
 
-    public boolean save(Task<?> taskView) {
-        Task<?> oldTask = tasks.put(taskView.id, taskView);
-        return oldTask == null;
+    @Override
+    public Group getTaskGroup(String taskId) throws IOException {
+        return tasks.getTaskGroup(taskId);
     }
 
     @Override
-    public void enqueue(Task<?> task) {
+    public <V extends Serializable> void enqueue(Task<V> task) {
         taskQueue.add(task);
     }
 
-    public boolean shutdownAndAwaitTermination(int timeout, TimeUnit timeUnit) throws InterruptedException {
-        taskQueue.add(Task.nullObject());
-        waitTasksToBeDone(timeout, timeUnit);
-        executor.shutdownNow();
-        return executor.awaitTermination(timeout, timeUnit);
-    }
-
-    public List<Task<?>> waitTasksToBeDone(int timeout, TimeUnit timeUnit) {
-        return tasks.values().stream().peek(taskView -> {
-            try {
-                taskView.getResult(timeout, timeUnit);
-            } catch (InterruptedException | CancellationException e) {
-                logger.error("task interrupted while running", e);
-            }
-        }).collect(toList());
-    }
-
-    public List<Task<?>> clearDoneTasks() {
-        return tasks.values().stream().filter(taskView -> taskView.getState() != RUNNING).map(t -> tasks.remove(t.id)).collect(toList());
+    @Override
+    public boolean shutdown() throws IOException {
+        executor.shutdown();
+        loops.forEach(TaskWorkerLoop::exit);
+        try {
+            return executor.awaitTermination(pollingInterval * 2L, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
-    public <V> Task<V> clearTask(String taskName) {
-        return (Task<V>) tasks.remove(taskName);
+    public List<Task<?>> clearDoneTasks(TaskFilters filters) throws IOException {
+        synchronized (tasks) {
+            // Require tasks to be in final state and apply user filters
+            Stream<Task<?>> taskStream = tasks.getTasks(filters.withStates(FINAL_STATES))
+                .map(t -> {
+                    try {
+                        return tasks.delete(t.id);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            return taskStream.toList();
+        }
     }
 
-    public boolean stopTask(String taskId) {
-        Task<?> taskView = tasks.get(taskId);
+    @Override
+    public <V extends Serializable> Task<V> clearTask(String taskId) throws UnknownTask, IOException {
+        if (getTask(taskId).getState() == Task.State.RUNNING) {
+            throw new IllegalStateException(String.format("task id <%s> is already in RUNNING state", taskId));
+        }
+        logger.info("deleting task id <{}>", taskId);
+        synchronized (tasks) {
+            return tasks.delete(taskId);
+        }
+    }
+
+    public boolean stopTask(String taskId) throws UnknownTask, IOException {
+        Task<?> taskView = tasks.getTask(taskId);
         if (taskView != null) {
             switch (taskView.getState()) {
+                case CREATED:
                 case QUEUED:
                     boolean removed = taskQueue.remove(taskView);
                     canceled(taskView, false);
                     return removed;
                 case RUNNING:
-                    loop.cancel(taskId, false);
+                    logger.info("sending cancel event for {}", taskId);
+                    loops.forEach(l -> l.cancel(taskId, false));
                     return true;
             }
         } else {
@@ -168,6 +198,11 @@ public class TaskManagerMemory implements TaskManager, TaskSupplier {
     }
 
     @Override
+    public int getTerminationPollingInterval() {
+        return taskPollingIntervalMs;
+    }
+
+    @Override
     public void close() throws IOException {
         executor.shutdown();
     }
@@ -177,14 +212,35 @@ public class TaskManagerMemory implements TaskManager, TaskSupplier {
     }
 
     @Override
-    public void clear() {
+    public void clear() throws IOException {
         executedTasks.set(0);
         taskQueue.clear();
-        tasks.clear();
+        synchronized (tasks) {
+            tasks.deleteAll();
+        }
     }
 
     @Override
-    public void addEventListener(Consumer<TaskEvent> callback) {
+    public boolean getHealth() {
+        return !executor.isShutdown();
+    }
+
+    @Override
+    public <V extends Serializable> void insert(Task<V> task, Group group) throws TaskAlreadyExists, IOException {
+        synchronized (tasks) {
+            tasks.insert(task, group);
+        }
+    }
+
+    @Override
+    public <V extends Serializable> void update(Task<V> task) throws IOException, UnknownTask {
+        synchronized (tasks) {
+            tasks.update(task);
+        }
+    }
+
+    @Override
+    public void addEventListener(Consumer<Event> callback) {
         // no need for this we use task runner reference for stopping tasks
     }
 

@@ -2,20 +2,21 @@ package org.icij.datashare.tasks;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
-import java.util.concurrent.BlockingQueue;
+import org.icij.datashare.PropertiesProvider;
+import org.icij.datashare.asynctasks.TaskRepository;
+
 import java.util.concurrent.CountDownLatch;
-import org.icij.datashare.asynctasks.Task;
 
 
 @Singleton
 public class TaskManagerMemory extends org.icij.datashare.asynctasks.TaskManagerMemory {
 
     @Inject
-    public TaskManagerMemory(BlockingQueue<Task<?>> taskQueue, DatashareTaskFactory taskFactory) {
-        this(taskQueue, taskFactory, new CountDownLatch(1));
+    public TaskManagerMemory(DatashareTaskFactory taskFactory, TaskRepository taskRepository, PropertiesProvider propertiesProvider) {
+        this(taskFactory, taskRepository, propertiesProvider, new CountDownLatch(1));
     }
 
-    TaskManagerMemory(BlockingQueue<Task<?>> taskQueue, DatashareTaskFactory taskFactory, CountDownLatch latch) {
-        super(taskQueue, taskFactory, latch);
+    TaskManagerMemory(DatashareTaskFactory taskFactory, TaskRepository taskRepository, PropertiesProvider propertiesProvider, CountDownLatch latch) {
+        super(taskFactory, taskRepository, propertiesProvider, latch);
     }
 }

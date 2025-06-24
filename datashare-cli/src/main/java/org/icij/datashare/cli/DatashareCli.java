@@ -6,6 +6,7 @@ import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
 import org.icij.datashare.PipelineHelper;
 import org.icij.datashare.cli.spi.CliExtension;
+import org.icij.datashare.user.User;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,6 +20,7 @@ import static java.util.Optional.ofNullable;
 import static org.icij.datashare.cli.DatashareCliOptions.DEFAULT_PROJECT_OPT;
 import static org.icij.datashare.cli.DatashareCliOptions.DIGEST_PROJECT_NAME_OPT;
 import static org.icij.datashare.cli.DatashareCliOptions.NO_DIGEST_PROJECT_OPT;
+import static org.icij.datashare.cli.DatashareCliOptions.OAUTH_USER_PROJECTS_KEY_OPT;
 import static org.icij.datashare.cli.DatashareCliOptions.OPT_ALIASES;
 
 
@@ -73,6 +75,10 @@ public class DatashareCli {
                     && properties.getProperty(DIGEST_PROJECT_NAME_OPT) == null) {
                 properties.setProperty(DIGEST_PROJECT_NAME_OPT, properties.getProperty(DEFAULT_PROJECT_OPT));
             }
+            if (!User.DEFAULT_PROJECTS_KEY.equals(properties.getProperty(OAUTH_USER_PROJECTS_KEY_OPT))) {
+                LOGGER.info("settings system property {} to {}", User.JVM_PROJECT_KEY, properties.getProperty(OAUTH_USER_PROJECTS_KEY_OPT));
+                System.setProperty(User.JVM_PROJECT_KEY, properties.getProperty(OAUTH_USER_PROJECTS_KEY_OPT));
+            }
             // Retro-compatibility so the alias options is are mapped to the right property
             for (String alias : OPT_ALIASES.keySet()) {
                 if (properties.containsKey(alias)) {
@@ -118,7 +124,10 @@ public class DatashareCli {
         DatashareCliOptions.enableOcr(parser);
         DatashareCliOptions.language(parser);
         DatashareCliOptions.ocrLanguage(parser);
+        DatashareCliOptions.ocrType(parser);
         DatashareCliOptions.nlpPipeline(parser);
+        DatashareCliOptions.nlpMaxTextLength(parser);
+        DatashareCliOptions.nlpBatchSize(parser);
         DatashareCliOptions.resume(parser);
         DatashareCliOptions.scroll(parser);
         DatashareCliOptions.scrollSize(parser);
@@ -150,6 +159,7 @@ public class DatashareCli {
         DatashareCliOptions.clusterName(parser);
         DatashareCliOptions.createIndex(parser);
         DatashareCliOptions.defaultUser(parser);
+        DatashareCliOptions.defaultUserProjectKey(parser);
         DatashareCliOptions.defaultProject(parser);
         DatashareCliOptions.oauthClaimIdAttribute(parser);
         DatashareCliOptions.esHost(parser);
@@ -181,6 +191,12 @@ public class DatashareCli {
         DatashareCliOptions.noDigestProject(parser);
         DatashareCliOptions.logLevel(parser);
         DatashareCliOptions.searchQuery(parser);
+        DatashareCliOptions.taskRoutingStrategy(parser);
+        DatashareCliOptions.taskRoutingKey(parser);
+        DatashareCliOptions.pollingInterval(parser);
+        DatashareCliOptions.taskRepositoryType(parser);
+        DatashareCliOptions.taskManagerPollingInterval(parser);
+        DatashareCliOptions.taskWorkers(parser);
         return parser;
     }
 

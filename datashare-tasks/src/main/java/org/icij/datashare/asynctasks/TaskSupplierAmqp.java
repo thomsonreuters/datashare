@@ -6,10 +6,10 @@ import org.icij.datashare.asynctasks.bus.amqp.AmqpInterlocutor;
 import org.icij.datashare.asynctasks.bus.amqp.AmqpQueue;
 import org.icij.datashare.asynctasks.bus.amqp.CancelledEvent;
 import org.icij.datashare.asynctasks.bus.amqp.ErrorEvent;
+import org.icij.datashare.asynctasks.bus.amqp.Event;
 import org.icij.datashare.asynctasks.bus.amqp.ProgressEvent;
 import org.icij.datashare.asynctasks.bus.amqp.ResultEvent;
 import org.icij.datashare.asynctasks.bus.amqp.TaskError;
-import org.icij.datashare.asynctasks.bus.amqp.TaskEvent;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
@@ -22,14 +22,20 @@ import java.util.function.Consumer;
 
 public class TaskSupplierAmqp implements TaskSupplier {
     final AmqpConsumer<Task, Consumer<Task>> consumer;
-    final AmqpConsumer<TaskEvent, Consumer<TaskEvent>> eventConsumer;
-    final List<Consumer<TaskEvent>> eventCallbackList = new LinkedList<>();
+    final AmqpConsumer<Event, Consumer<Event>> eventConsumer;
+    final List<Consumer<Event>> eventCallbackList = new LinkedList<>();
     private final AmqpInterlocutor amqp;
 
     public TaskSupplierAmqp(AmqpInterlocutor amqp) throws IOException {
+        this(amqp, null);
+    }
+
+    public TaskSupplierAmqp(AmqpInterlocutor amqp, String routingKey) throws IOException {
         this.amqp = amqp;
-        consumer = new AmqpConsumer<>(amqp, null, AmqpQueue.TASK, Task.class);
-        eventConsumer = new AmqpConsumer<>(amqp, this::handleEvent, AmqpQueue.WORKER_EVENT, TaskEvent.class).consumeEvents();
+        this.consumer = routingKey == null ?
+                new AmqpConsumer<>(amqp, null, AmqpQueue.TASK, Task.class):
+                new AmqpConsumer<>(amqp, null, AmqpQueue.TASK, Task.class, routingKey);
+        this.eventConsumer = new AmqpConsumer<>(amqp, this::handleEvent, AmqpQueue.WORKER_EVENT, Event.class).consumeEvents();
     }
 
     @Override
@@ -53,11 +59,9 @@ public class TaskSupplierAmqp implements TaskSupplier {
     }
 
     @Override
-    public <V extends Serializable> void result(String taskId, V result) {
+    public <V extends Serializable> void result(String taskId, TaskResult<V> result) {
         try {
-            amqp.publish(AmqpQueue.MANAGER_EVENT, result.getClass().isAssignableFrom(TaskError.class) ?
-                    new ErrorEvent(taskId, (TaskError) result):
-                    new ResultEvent<>(taskId, result));
+            amqp.publish(AmqpQueue.MANAGER_EVENT, new ResultEvent<>(taskId, result));
         } catch (IOException e) {
             LoggerFactory.getLogger(getClass()).warn("cannot publish result {} for task {}", result, taskId);
         }
@@ -79,15 +83,19 @@ public class TaskSupplierAmqp implements TaskSupplier {
 
     @Override
     public void error(String taskId, TaskError taskError) {
-        result(taskId, taskError);
+        try {
+            amqp.publish(AmqpQueue.MANAGER_EVENT,new ErrorEvent(taskId, taskError));
+        } catch (IOException e) {
+            LoggerFactory.getLogger(getClass()).warn("cannot publish error for task {}", taskId);
+        }
     }
 
-    private void handleEvent(TaskEvent taskEvent) {
+    private void handleEvent(Event taskEvent) {
         eventCallbackList.forEach(c -> c.accept(taskEvent));
     }
 
     @Override
-    public void addEventListener(Consumer<TaskEvent> callback) {
+    public void addEventListener(Consumer<Event> callback) {
         eventCallbackList.add(callback);
     }
 
@@ -99,5 +107,6 @@ public class TaskSupplierAmqp implements TaskSupplier {
     @Override
     public void close() throws IOException {
         consumer.shutdown();
+        eventConsumer.shutdown();
     }
 }

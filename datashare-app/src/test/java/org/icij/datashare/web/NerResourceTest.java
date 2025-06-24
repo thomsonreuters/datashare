@@ -7,9 +7,9 @@ import org.icij.datashare.text.Document;
 import org.icij.datashare.text.DocumentBuilder;
 import org.icij.datashare.text.NamedEntity;
 import org.icij.datashare.text.nlp.Annotations;
-import org.icij.datashare.text.nlp.NlpStage;
 import org.icij.datashare.text.nlp.Pipeline;
 import org.icij.datashare.web.testhelpers.AbstractProdWebServerTest;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mock;
@@ -18,7 +18,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
 import static org.fest.assertions.Assertions.assertThat;
 import static org.fest.assertions.MapAssert.entry;
@@ -29,19 +28,27 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.verify;
-import static org.mockito.MockitoAnnotations.initMocks;
+import static org.mockito.MockitoAnnotations.openMocks;
 
 public class NerResourceTest extends AbstractProdWebServerTest {
     @Mock Pipeline pipeline;
     @Mock PipelineRegistry registry;
 
+    private static AutoCloseable openMocks;
+
+
     @Before
     public void setUp() throws Exception {
-        initMocks(this);
+        openMocks = openMocks(this);
         doReturn(true).when(pipeline).initialize(any());
         doReturn(pipeline).when(registry).get(any());
         NerResource nerResource = new NerResource(registry, l -> ENGLISH);
         configure(routes -> routes.add(nerResource));
+    }
+
+    @After
+    public void teardown() throws Exception {
+        openMocks.close();
     }
 
     @Test
@@ -55,28 +62,28 @@ public class NerResourceTest extends AbstractProdWebServerTest {
     }
 
     @Test
-    public void test_get_pipeline_list() throws Exception {
-        doReturn(asSet(Pipeline.Type.EMAIL, Pipeline.Type.IXAPIPE)).when(registry).getPipelineTypes();
-        get("/api/ner/pipelines").should().respond(200).contain("EMAIL").contain("IXAPIPE");
+    public void test_get_pipeline_list() {
+        doReturn(asSet(Pipeline.Type.EMAIL, Pipeline.Type.SPACY)).when(registry).getPipelineTypes();
+        get("/api/ner/pipelines").should().respond(200).contain("EMAIL").contain("SPACY");
     }
 
     @Test
     public void test_post_text_returns_NamedEntity_list() throws Exception {
         Document doc = DocumentBuilder.createDoc("inline").with("This the 'foù' file content.").with(ENGLISH).build();
         final Annotations annotations = new Annotations("inline", CORENLP, ENGLISH);
-        annotations.add(NlpStage.NER, 10, 13, NamedEntity.Category.PERSON);
-        doReturn(asList(NamedEntity.create(NamedEntity.Category.PERSON, "foù", asList(10L), doc.getId(), "root", CORENLP, ENGLISH))).when(pipeline).process(eq(doc));
+        annotations.add( 10, 13, NamedEntity.Category.PERSON);
+        doReturn(List.of(NamedEntity.create(NamedEntity.Category.PERSON, "foù", List.of(10L), doc.getId(), "root", CORENLP, ENGLISH))).when(pipeline).process(eq(doc));
 
         Response response = post("/api/ner/findNames/CORENLP", doc.getContent()).response();
 
-        List actualNerList = TypeConvert.fromJson(response.content(), List.class);
+        List<?> actualNerList = TypeConvert.fromJson(response.content(), List.class);
         assertThat(actualNerList).hasSize(1);
         assertThat(actualNerList.get(0)).isInstanceOf(HashMap.class);
-        assertThat((Map) actualNerList.get(0)).includes(
+        assertThat((Map<?, ?>) actualNerList.get(0)).includes(
                 entry("mention", "foù"),
                 entry("extractor", "CORENLP"),
                 entry("mentionNorm", "fou"),
-                entry("offsets", asList(10))
+                entry("offsets", List.of(10))
         );
     }
 }

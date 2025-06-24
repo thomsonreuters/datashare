@@ -5,7 +5,6 @@ import org.icij.datashare.json.JsonObjectMapper;
 import org.icij.datashare.user.User;
 import org.junit.Test;
 
-import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -13,6 +12,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.fest.assertions.Assertions.assertThat;
+import static org.fest.assertions.MapAssert.entry;
 
 public class TaskTest {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -28,25 +28,23 @@ public class TaskTest {
             }
         });
 
-        taskView.setResult("foo");
+        taskView.setResult(new TaskResult<>("foo"));
         executor.shutdownNow();
         assertThat(executor.awaitTermination(1, TimeUnit.SECONDS)).isTrue();
         assertThat(taskView.getProgress()).isEqualTo(1);
-        assertThat(taskView.getResult()).isEqualTo("foo");
+        assertThat(taskView.getResult()).isEqualTo(new TaskResult<>("foo"));
         assertThat(taskView.getState()).isEqualTo(Task.State.DONE);
     }
 
     @Test
-    public void test_get_result_sync_when_task_is_not_local() {
-        Task<Object> taskView = new Task<>("id", "task", Task.State.DONE, 1, null, new HashMap<>());
-        assertThat(taskView.getResult()).isNull();
-        assertThat(taskView.getState()).isEqualTo(Task.State.DONE);
-        assertThat(taskView.getProgress()).isEqualTo(1);
+    public void test_user_parameter() {
+        Task<String> taskView = new Task<>("foo", User.local(), Map.of("baz", "qux"));
+        assertThat(taskView.args).includes(entry("user", User.local()), entry("baz", "qux"));
     }
 
     @Test
     public void test_progress() {
-        Task<Object> taskView = new Task<>("name", User.local(), new HashMap<>());
+        Task<String> taskView = new Task<>("name", User.local(), new HashMap<>());
         assertThat(taskView.getProgress()).isEqualTo(0);
         assertThat(taskView.getState()).isEqualTo(Task.State.CREATED);
 
@@ -56,12 +54,6 @@ public class TaskTest {
         taskView.setProgress(0.3);
         assertThat(taskView.getProgress()).isEqualTo(0.3);
         assertThat(taskView.getState()).isEqualTo(Task.State.RUNNING);
-    }
-
-    @Test
-    public void test_get_result_sync_when_task_is_not_local_and_result_is_not_null() {
-        Task<Object> taskView = new Task<>("id", "task", Task.State.DONE, 1, "run", new HashMap<>());
-        assertThat(taskView.getResult()).isEqualTo("run");
     }
 
     @Test
@@ -84,24 +76,13 @@ public class TaskTest {
 
     @Test
     public void test_serialize_deserialize() throws Exception {
-        Task<Object> taskView = new Task<>("name", User.local(), Map.of("key", "value"));
+        Task<String> taskView = new Task<>("name", User.local(), Map.of("key", "value"));
         String json = JsonObjectMapper.MAPPER.writeValueAsString(taskView);
         assertThat(json).contains("\"@type\":\"Task\"");
         assertThat(json).contains("\"user\":{\"@type\":\"org.icij.datashare.user.User\"");
 
         Task<?> taskCreation = JsonObjectMapper.MAPPER.readValue(json, Task.class);
         assertThat(taskCreation).isEqualTo(taskView);
-        assertThat(taskCreation.createdAt).isEqualTo(taskCreation.createdAt);
-    }
-
-    @Test
-    public void test_serialize_deserialize_null() throws Exception {
-        String json = JsonObjectMapper.MAPPER.writeValueAsString(Task.nullObject());
-        assertThat(json).contains("\"@type\":\"Task\"");
-        assertThat(json).contains("\"args\":{}");
-
-        Task<?> taskCreation = JsonObjectMapper.MAPPER.readValue(json, Task.class);
-        assertThat(taskCreation).isEqualTo(Task.nullObject());
         assertThat(taskCreation.createdAt).isEqualTo(taskCreation.createdAt);
     }
 }

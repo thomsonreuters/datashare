@@ -1,7 +1,13 @@
 package org.icij.datashare.tasks;
 
 import org.icij.datashare.asynctasks.CancelException;
+import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.asynctasks.TaskGroup;
+import org.icij.datashare.asynctasks.TaskGroupType;
 
+import java.util.function.Function;
+
+@TaskGroup(TaskGroupType.Test)
 public class TestSleepingTask extends TestTask {
     public TestSleepingTask(int value) {
         super(value);
@@ -19,3 +25,4 @@ public class TestSleepingTask extends TestTask {
         }
     }
 }
+

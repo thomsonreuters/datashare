@@ -1,45 +1,58 @@
 package org.icij.datashare.asynctasks;
 
-import org.icij.datashare.asynctasks.bus.amqp.AmqpInterlocutor;
-import org.icij.datashare.asynctasks.bus.amqp.AmqpQueue;
-import org.icij.datashare.asynctasks.bus.amqp.CancelEvent;
-import org.icij.datashare.asynctasks.bus.amqp.TaskEvent;
-import org.icij.datashare.asynctasks.bus.amqp.AmqpConsumer;
-import org.icij.datashare.user.User;
-
-import java.io.IOException;
-import java.util.LinkedList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
-import java.util.regex.Pattern;
+import org.icij.datashare.asynctasks.bus.amqp.*;
+
+import org.icij.datashare.tasks.RoutingStrategy;
+
+import java.io.IOException;
+import java.io.Serializable;
+import java.util.stream.Stream;
 
 import static java.util.Optional.ofNullable;
-import static java.util.stream.Collectors.toList;
+import static org.icij.datashare.asynctasks.Task.State.FINAL_STATES;
 
 public class TaskManagerAmqp implements TaskManager {
-    private final Map<String, Task<?>> tasks;
+    protected static final int DEFAULT_TASK_POLLING_INTERVAL_MS = 5000;
+    private final TaskRepository tasks;
+    private final RoutingStrategy routingStrategy;
     private final AmqpInterlocutor amqp;
     private final AmqpConsumer<TaskEvent, Consumer<TaskEvent>> eventConsumer;
+    private final int taskPollingIntervalMs;
 
-    public TaskManagerAmqp(AmqpInterlocutor amqp, Map<String, Task<?>> tasks) throws IOException {
-        this(amqp, tasks, null);
+    public TaskManagerAmqp(AmqpInterlocutor amqp, TaskRepository taskRepository) throws IOException {
+        this(amqp, taskRepository, RoutingStrategy.UNIQUE);
     }
 
-    public TaskManagerAmqp(AmqpInterlocutor amqp, Map<String, Task<?>> tasks, Runnable eventCallback) throws IOException {
+    public TaskManagerAmqp(AmqpInterlocutor amqp, TaskRepository tasks, RoutingStrategy routingStrategy) throws IOException {
+        this(amqp, tasks, routingStrategy, null);
+    }
+
+    public TaskManagerAmqp(AmqpInterlocutor amqp, TaskRepository tasks, RoutingStrategy routingStrategy, Runnable eventCallback) throws IOException {
+        this(amqp, tasks, routingStrategy, eventCallback, DEFAULT_TASK_POLLING_INTERVAL_MS);
+    }
+
+    public TaskManagerAmqp(AmqpInterlocutor amqp, TaskRepository tasks, RoutingStrategy routingStrategy, Runnable eventCallback, int taskPollingIntervalMs) throws IOException {
         this.amqp = amqp;
         this.tasks = tasks;
+        this.routingStrategy = routingStrategy;
+        this.taskPollingIntervalMs = taskPollingIntervalMs;
         eventConsumer = new AmqpConsumer<>(amqp, event ->
                 ofNullable(TaskManager.super.handleAck(event)).flatMap(t ->
                         ofNullable(eventCallback)).ifPresent(Runnable::run), AmqpQueue.MANAGER_EVENT, TaskEvent.class).consumeEvents();
     }
 
     @Override
-    public boolean stopTask(String taskId) {
-        Task<?> taskView = tasks.get(taskId);
+    public boolean stopTask(String taskId) throws IOException, UnknownTask {
+        Task<?> taskView = this.getTask(taskId);
         if (taskView != null) {
             try {
+                logger.info("sending cancel event for {}", taskId);
                 amqp.publish(AmqpQueue.WORKER_EVENT, new CancelEvent(taskId, false));
             } catch (IOException e) {
                 throw new RuntimeException(e);
@@ -52,43 +65,71 @@ public class TaskManagerAmqp implements TaskManager {
     }
 
     @Override
-    public <V> Task<V> clearTask(String taskId) {
-        return null;
+    public <V extends Serializable> Task<V> clearTask(String taskId) throws IOException, UnknownTask {
+        if (this.getTask(taskId).getState() == Task.State.RUNNING) {
+            throw new IllegalStateException(String.format("task id <%s> is already in RUNNING state", taskId));
+        }
+        logger.info("deleting task id <{}>", taskId);
+        return tasks.delete(taskId);
     }
 
     @Override
-    public boolean shutdownAndAwaitTermination(int timeout, TimeUnit timeUnit) throws InterruptedException {
-        return false;
-    }
-
-    public boolean save(Task<?> task) {
-        Task<?> oldVal = tasks.put(task.id, task);
-        return oldVal == null;
+    public boolean shutdown() throws IOException {
+        amqp.publish(AmqpQueue.WORKER_EVENT, new ShutdownEvent());
+        return true;
     }
 
     @Override
-    public void enqueue(Task<?> task) throws IOException {
-        amqp.publish(AmqpQueue.TASK, task);
+    public <V extends Serializable> void insert(Task<V> task, Group group) throws IOException, TaskAlreadyExists {
+        tasks.insert(task, group);
     }
 
     @Override
-    public <V> Task<V> getTask(String taskId) {
-        return (Task<V>) tasks.get(taskId);
+    public <V extends Serializable> void update(Task<V> task) throws IOException, UnknownTask {
+        tasks.update(task);
     }
 
     @Override
-    public List<Task<?>> getTasks() {
-        return new LinkedList<>(tasks.values());
+    public <V extends Serializable> void enqueue(Task<V> task) throws IOException {
+        switch (routingStrategy) {
+            case GROUP -> amqp.publish(AmqpQueue.TASK, this.tasks.getTaskGroup(task.id).id().name(), task);
+            case NAME -> amqp.publish(AmqpQueue.TASK, task.name, task);
+            default -> amqp.publish(AmqpQueue.TASK, task);
+        }
     }
 
     @Override
-    public List<Task<?>> getTasks(User user, Pattern pattern) {
-        return TaskManager.getTasks(tasks.values().stream(), user, pattern);
+    public <V extends Serializable> Task<V> getTask(String taskId) throws IOException, UnknownTask {
+        return tasks.getTask(taskId);
     }
 
     @Override
-    public List<Task<?>> clearDoneTasks() {
-        return tasks.values().stream().filter(f -> f.getState() != Task.State.RUNNING).map(t -> tasks.remove(t.id)).collect(toList());
+    public Stream<Task<?>> getTasks(TaskFilters filters) throws IOException {
+        return tasks.getTasks(filters);
+    }
+
+    @Override
+    public Group getTaskGroup(String taskId) throws IOException {
+        return tasks.getTaskGroup(taskId);
+    }
+
+    @Override
+    public List<Task<?>> clearDoneTasks(TaskFilters filters) throws IOException {
+        // Require tasks to be in final state and apply user filters
+        Stream<Task<?>> taskStream = tasks.getTasks(filters.withStates(FINAL_STATES))
+            .map(t -> {
+                try {
+                    return tasks.delete(t.id);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        return taskStream.toList();
+    }
+
+    @Override
+    public int getTerminationPollingInterval() {
+        return taskPollingIntervalMs;
     }
 
     public void close() throws IOException {
@@ -97,7 +138,23 @@ public class TaskManagerAmqp implements TaskManager {
     }
 
     @Override
-    public void clear() {
-        tasks.clear();
+    public void clear() throws IOException {
+        tasks.deleteAll();
+    }
+
+    @Override
+    public boolean getHealth() {
+        try {
+            if (amqp.hasMonitoringQueue()) {
+                logger.info("sending monitoring event");
+                amqp.publish(AmqpQueue.MONITORING, new MonitoringEvent());
+                return true;
+            } else {
+                return amqp.isConnectionOpen();
+            }
+        } catch (RuntimeException|IOException e) {
+            logger.error("error sending monitoring event", e);
+            return false;
+        }
     }
 }
